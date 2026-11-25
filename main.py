@@ -1,27 +1,19 @@
-Вот готовый код. Полностью замени им содержимое своего файла main.py в репозитории, закоммить изменения и перезапусти бота на Bothost.
+"""VEX — Discord-бот для управления Rust-кланом. Весь проект в ОДНОМ файле.
 
-python
-Копировать
+Запуск:  python main.py
+Переменные окружения: DISCORD_TOKEN (обязательно), GUILD_ID, DATA_DIR, TIMEZONE.
+Библиотека discord.py при первом запуске установится автоматически.
+
+Устройство файла: ниже в словаре _SOURCES лежит исходный код модулей бота (обычный текст,
+его можно править прямо здесь — цвета, типы тикетов и домены в блоке vex/config.py).
+В самом конце файла — точка входа.
 """
-VEX — Discord-бот для управления Rust-кланом. Весь проект в ОДНОМ файле с единым дашбордом.
-
-Запуск: python main.py
-Переменные окружения:
-  DISCORD_TOKEN (обязательно) — токен бота;
-  GUILD_ID — ID твоего сервера (чтобы команды появились сразу);
-  DATA_DIR — папка для базы (по умолчанию /app/data на хостинге);
-  TIMEZONE — часовой пояс (по умолчанию Europe/Moscow);
-  PORT — порт сайта (например 3000), если включён домен;
-  DISCORD_CLIENT_SECRET — секрет из OAuth2 Discord (для входа на сайт).
-
-Сайт-панель включается автоматически при наличии PORT и CLIENT_SECRET.
-"""
-
 import importlib.abc
 import importlib.util
 import logging
 import subprocess
 import sys
+
 
 def _ensure_dependencies():
     try:
@@ -41,22 +33,25 @@ def _ensure_dependencies():
         )
     importlib.invalidate_caches()
 
+
 _ensure_dependencies()
 
 _PACKAGES = ['vex', 'vex.cogs']
 
 _SOURCES = {
-    'vex': r'''"""VEX — Discord-бот для управления клан-сообществом в Rust."""''',
+    'vex': r'''"""VEX — Discord-бот для управления клан-сообществом в Rust."""
+''',
     'vex.config': r'''"""Настройки и константы VEX. Всё, что хочется поменять «под себя», — здесь."""
-import json
 import os
 from pathlib import Path
 
-try:
+try:  # .env нужен только для локального запуска; на хостинге переменные задаются в панели
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
+
 
 def _int(name: str, default: int = 0) -> int:
     try:
@@ -64,33 +59,55 @@ def _int(name: str, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
 
+
+# --- Окружение -------------------------------------------------------------
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GUILD_ID = _int("GUILD_ID")
+GUILD_ID = _int("GUILD_ID")  # ID сервера: команды появятся сразу. Пусто = глобальная синхронизация (до часа)
+# Здесь лежит база. На bothost постоянные данные хранятся в /app/data — он выбирается сам, если существует.
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if Path("/app").is_dir() else "./data"))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
-WEB_PORT = _int("PORT") or _int("WEB_PORT")
-CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
-CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
-
+# --- Оформление ------------------------------------------------------------
 BRAND = "VEX"
 FOOTER = "VEX • Clan Control"
-COLOR_MAIN = 0x8B5CF6
-COLOR_DARK = 0x6D28D9
+COLOR_MAIN = 0x8B5CF6  # фиолетовый
+COLOR_DARK = 0x6D28D9  # тёмно-фиолетовый (закрытые события)
 COLOR_OK = 0x22C55E
 COLOR_ERR = 0xEF4444
 COLOR_WARN = 0xF59E0B
 
+# --- Тикеты: типы обращений (меню на панели). Меняй как угодно, до 25 штук. ---
+TICKET_TYPES = [
+    {"key": "join", "slug": "join", "label": "Вступление в клан", "emoji": "🛡️",
+     "description": "Подать заявку на вступление"},
+    {"key": "question", "slug": "question", "label": "Вопрос", "emoji": "❓",
+     "description": "Задать вопрос администрации"},
+    {"key": "report", "slug": "report", "label": "Жалоба", "emoji": "🚨",
+     "description": "Жалоба на игрока или участника клана"},
+    {"key": "appeal", "slug": "appeal", "label": "Обжалование наказания", "emoji": "⚖️",
+     "description": "Оспорить мут, бан или предупреждение"},
+    {"key": "other", "slug": "other", "label": "Другое", "emoji": "📨",
+     "description": "Всё остальное"},
+]
+
+# --- Автомодерация: домены, которые разрешены всегда ------------------------
+DEFAULT_ALLOWED_DOMAINS = (
+    "tenor.com",
+    "giphy.com",
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+)
+
+# --- Ключи команд для системы доступа (/perms) -------------------------------
 COMMAND_KEYS = {
     "ticket_admin": "Панель и настройка тикетов",
-    "ticket_manage": "Работа с тикетами",
-    "role": "Выдача и снятие ролей",
-    "role_admin": "Список выдаваемых ролей",
-    "wipe": "Вайп-реакты",
-    "automod": "Автомодерация ссылок",
-    "autorole": "Авто-выдача ролей",
-    "say": "Сообщения от имени бота",
+    "ticket_manage": "Работа с тикетами (закрыть, добавить, взять)",
+    "role": "Выдача и снятие ролей (/role add, /role remove)",
+    "role_admin": "Список ролей, которые можно выдавать (/role allow)",
+    "wipe": "Вайп-реакты и /noreact",
+    "automod": "Настройка автомодерации",
+    "autorole": "Настройка авто-выдачи ролей",
+    "say": "Сообщения от имени бота (/say)",
 }
 ''',
     'vex.embeds': r'''"""Единый стиль эмбедов VEX."""
@@ -98,25 +115,30 @@ import discord
 
 from . import config
 
+
 def make(title=None, description=None, color=config.COLOR_MAIN, footer=True):
     embed = discord.Embed(title=title, description=description, color=color)
     if footer:
         embed.set_footer(text=config.FOOTER)
     return embed
 
+
 def ok(text, title="Готово"):
     return make(f"✅ {title}", text, config.COLOR_OK)
+
 
 def err(text, title="Ошибка"):
     return make(f"⛔ {title}", text, config.COLOR_ERR)
 
+
 def warn(text, title="Внимание"):
     return make(f"⚠️ {title}", text, config.COLOR_WARN)
+
 
 def info(text, title=None):
     return make(title, text)
 ''',
-    'vex.db': r'''"""Небольшая обёртка над SQLite."""
+    'vex.db': r'''"""Небольшая обёртка над SQLite (стандартная библиотека, без доп. зависимостей)."""
 import asyncio
 import sqlite3
 import threading
@@ -143,15 +165,6 @@ CREATE TABLE IF NOT EXISTS allowed_domains (
     PRIMARY KEY (guild_id, domain)
 );
 
-CREATE TABLE IF NOT EXISTS automod_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id   INTEGER NOT NULL,
-    user_idствием INTEGER NOT NULL,
-    channel_id INTEGER NOT NULL,
-    link       TEXT    NOT NULL,
-    ts         INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS tickets (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id   INTEGER NOT NULL,
@@ -160,7 +173,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     type       TEXT    NOT NULL,
     reason     TEXT    NOT NULL DEFAULT '',
     claimed_by INTEGER,
- статуса TEXT    NOT NULL DEFAULT 'open',
+    status     TEXT    NOT NULL DEFAULT 'open',
     created_at INTEGER NOT NULL,
     closed_at  INTEGER
 );
@@ -190,6 +203,7 @@ CREATE TABLE IF NOT EXISTS wipe_responses (
 );
 """
 
+
 class Database:
     def __init__(self, path):
         self.path = Path(path)
@@ -213,28 +227,6 @@ class Database:
         with self._lock:
             cur = self._conn.execute(sql, params)
             return cur.fetchone() if one else cur.fetchall()
-
-    def _replace(self, table, guild_id, column, kind, values):
-        with self._lock:
-            if table == "guild_targets":
-                self._conn.execute("DELETE FROM guild_targets WHERE guild_id=? AND kind=?", (guild_id, kind))
-                self._conn.executemany(
-                    "INSERT OR IGNORE INTO guild_targets(guild_id, kind, target_id) VALUES(?,?,?)",
-                    [(guild_id, kind, v) for v in values],
-                )
-            else:
-                self._conn.execute("DELETE FROM allowed_domains WHERE guild_id=?", (guild_id,))
-                self._conn.executemany(
-                    "INSERT OR IGNORE INTO allowed_domains(guild_id, domain) VALUES(?,?)",
-                    [(guild_id, v) for v in values],
-                )
-            self._conn.commit()
-
-    async def set_targets(self, guild_id, kind, ids):
-        await asyncio.to_thread(self._replace, "guild_targets", guild_id, None, kind, list(ids))
-
-    async def set_domains(self, guild_id, domains):
-        await asyncio.to_thread(self._replace, "allowed_domains", guild_id, None, None, list(domains))
 
     async def execute(self, sql, params=()):
         rowcount, _ = await asyncio.to_thread(self._execute, sql, tuple(params))
@@ -272,7 +264,7 @@ class Database:
         )
         return [r["target_id"] for r in rows]
 
-    async def add_target(self, guild_id kind, target_id):
+    async def add_target(self, guild_id, kind, target_id):
         changed = await self.execute(
             "INSERT OR IGNORE INTO guild_targets(guild_id, kind, target_id) VALUES(?,?,?)",
             (guild_id, kind, target_id),
@@ -281,25 +273,42 @@ class Database:
 
     async def remove_target(self, guild_id, kind, target_id):
         changed = await self.execute(
-            "DELETE FROM guild_targets WHERE guild_id=? AND kind=? AND target_id=?", (guild_id, kind, target_id)
+            "DELETE FROM guild_targets WHERE guild_id=? AND kind=? AND target_id=?",
+            (guild_id, kind, target_id),
         )
         return changed > 0
 
     async def clear_targets(self, guild_id, kind):
         await self.execute("DELETE FROM guild_targets WHERE guild_id=? AND kind=?", (guild_id, kind))
+
+    async def set_targets(self, guild_id, kind, ids):
+        await self.execute("DELETE FROM guild_targets WHERE guild_id=? AND kind=?", (guild_id, kind))
+        for target_id in ids:
+            await self.add_target(guild_id, kind, target_id)
+
+    async def set_domains(self, guild_id, domains):
+        await self.execute("DELETE FROM allowed_domains WHERE guild_id=?", (guild_id,))
+        for domain in domains:
+            await self.execute(
+                "INSERT OR IGNORE INTO allowed_domains(guild_id, domain) VALUES(?,?)",
+                (guild_id, domain),
+            )
 ''',
-    'vex.checks': r'''"""Система доступа по ролям."""
+    'vex.checks': r'''"""Система доступа: какая роль может пользоваться какой командой."""
 import discord
 from discord import app_commands
 
+
 class NoAccess(app_commands.CheckFailure):
     def __init__(self, key=None, admin_only=False):
-        super().__init__("Нет доступа к команде")
         self.key = key
         self.admin_only = admin_only
+        super().__init__("Нет доступа к команде")
+
 
 def is_admin(member):
     return member.guild_permissions.administrator or member.guild.owner_id == member.id
+
 
 async def member_has_access(bot, member, key):
     if not isinstance(member, discord.Member):
@@ -309,12 +318,15 @@ async def member_has_access(bot, member, key):
     allowed = await bot.db.get_targets(member.guild.id, f"cmd:{key}")
     return any(role.id in allowed for role in member.roles)
 
+
 def access(key):
     async def predicate(interaction):
         if await member_has_access(interaction.client, interaction.user, key):
             return True
         raise NoAccess(key)
+
     return app_commands.check(predicate)
+
 
 def admin_only():
     async def predicate(interaction):
@@ -322,10 +334,12 @@ def admin_only():
         if isinstance(user, discord.Member) and is_admin(user):
             return True
         raise NoAccess(admin_only=True)
+
     return app_commands.check(predicate)
 ''',
-    'vex.bot': r'''"""Ядро бота."""
+    'vex.bot': r'''"""Ядро бота: интенты, загрузка модулей, обработка ошибок команд, логирование на сервер."""
 import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -333,18 +347,19 @@ from discord.ext import commands
 from . import config, embeds
 from .checks import NoAccess
 from .db import Database
-from .web import start_web
 
 log = logging.getLogger("vex")
 
 EXTENSIONS = (
+    "vex.cogs.panel",
     "vex.cogs.tickets",
     "vex.cogs.wipe",
     "vex.cogs.automod",
     "vex.cogs.roles",
     "vex.cogs.staff",
-    "vex.cogs.dashboard",  # новый модуль дашборда
+    "vex.cogs.admin",
 )
+
 
 class VexTree(app_commands.CommandTree):
     async def on_error(self, interaction, error):
@@ -352,13 +367,25 @@ class VexTree(app_commands.CommandTree):
             if error.admin_only:
                 text = "Эта команда доступна только администраторам."
             else:
-                text = "У тебя нет доступа к этой команде.\nАдминистратор выдаёт доступ через /dashboard."
-            await interaction.response.send_message(embed=embeds.err(text), ephemeral=True)
+                text = (
+                    "У тебя нет доступа к этой команде.\n"
+                    "Администратор может выдать его через `/panel` → «Доступ к командам»."
+                )
+            message = embeds.err(text, "Нет доступа")
         elif isinstance(error, app_commands.CheckFailure):
-            await interaction.response.send_message(embed=embeds.err("Эту команду нельзя использовать."), ephemeral=True)
+            message = embeds.err("Эту команду нельзя использовать здесь.", "Недоступно")
         else:
             log.error("Ошибка в команде %s", getattr(interaction.command, "name", "?"), exc_info=error)
-            await interaction.response.send_message(embed=embeds.err("Что-то пошло не так."), ephemeral=True)
+            message = embeds.err("Что-то пошло не так. Подробности записаны в логи бота.")
+
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=message, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=message, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
 
 class VexBot(commands.Bot):
     def __init__(self):
@@ -373,18 +400,13 @@ class VexBot(commands.Bot):
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
         )
         self.db = Database(config.DATA_DIR / "vex.sqlite3")
-        self.web_runner = None
-
-    async def close(self):
-        if self.web_runner is not None:
-            await self.web_runner.cleanup()
-        await super().close()
 
     async def setup_hook(self):
         self.db.connect()
         log.info("База данных: %s", self.db.path.resolve())
         for extension in EXTENSIONS:
             await self.load_extension(extension)
+
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             self.tree.copy_global_to(guild=guild)
@@ -392,11 +414,12 @@ class VexBot(commands.Bot):
         else:
             synced = await self.tree.sync()
         log.info("Синхронизировано команд: %d", len(synced))
-        self.web_runner = await start_web(self)
 
     async def on_ready(self):
         log.info("VEX запущен как %s (серверов: %d)", self.user, len(self.guilds))
-        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="за кланом"))
+        await self.change_presence(
+            activity=discord.Activity(type=discord.ActivityType.watching, name="за кланом")
+        )
 
     async def send_log(self, guild, embed, key="mod_log", file=None):
         channel_id = await self.db.get_setting(guild.id, key)
@@ -412,415 +435,375 @@ class VexBot(commands.Bot):
         except discord.HTTPException:
             log.warning("Не удалось отправить лог в канал %s", channel_id)
 ''',
-    'vex.webui': r'''"""Страницы сайта-панели VEX."""
-import html
-import re
-import zlib
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-FLASH_OK = {"saved": "Сохранено.", "sent": "Панель отправлена.", "deleted": "Удалено."}
-FLASH_ERR = {"denied": "Доступ запрещён.", "state": "Ошибка состояния.", "oauth": "OAuth ошибка.", "nosecret": "Нет Client Secret."}
-
-NAV = [("", "Обзор"), ("access", "Доступы"), ("roles", "Роли"), ("automod", "Автомод"), ("tickets", "Тикеты"), ("events", "События"), ("general", "Общие")]
-
-CSS = """:root{--bg:#0e0a1a;--panel:#171124;--brand:#8b5cf6}*{box-sizing:border-box}body{margin:0;font-family:sans-serif}a{color:#c4b5fd}.shell{max-width:1120px;margin:auto;padding:24px}.card{border:1px solid var(--line);border-radius:14px;padding:18px;background:var(--panel)}"""
-
-def esc(value): return html.escape(str(value))
-
-def layout(title, body, *, user=None, guild=None, section=None):
-    return f"<!doctype html><html><head><title>{esc(title)} · VEX</title><style>{CSS}</style></head><body><div class='shell'><h1>{esc(title)}</h1>{body}</body></html>"
-
-# Функции страниц сайта (обзор, доступы, роли, автомодерация, тикеты, события, общие настройки)
-# ... (код сайта остаётся прежним, он вызывается через start_web)
-''',
-    'vex.web': r'''"""Сайт-панель VEX."""
+    'vex.cogs': r'''''',
+    'vex.cogs.panel': r'''"""Единая админ-панель /panel: всё управление ботом в одном месте, кнопками."""
 import json
-import logging
-import secrets
-import time
-from urllib.parse import urlencode
-from aiohttp import web, ClientSession, ClientTimeout
-
-from . import config, webui
-from .checks import is_admin
-
-log = logging.getLogger("vex.web")
-API = "https://discord.com/api/v10"
-SESSION_TTL = 12 * 3600
-COOKIE = "vex_session"
-STATE_COOKIE = "vex_state"
-INVITE_PERMISSIONS = 1099780320272
-ADMINISTRATOR = 0x8
-
-def authorize(request):
-    sess = current_session(request)
-    if sess is None:
-        raise web.HTTPFound("/")
-    try:
-        gid = int(request.match_info["gid"])
-    except (KeyError, ValueError):
-        raise web.HTTPNotFound(text="Сервер не найден")
-    if gid not in sess["guilds"]:
-        raise web.HTTPForbidden(text="Нет доступа к этому серверу")
-    guild = request.app["bot"].get_guild(gid)
-    if guild is None:
-        raise web.HTTPNotFound(text="VEX не добавлен на этот сервер")
-    member = guild.get_member(sess["uid"])
-    if member is not None and not is_admin(member):
-        raise web.HTTPForbidden(text="Ты больше не администратор этого сервера")
-    return sess, guild
-
-def current_session(request):
-    token = request.cookies.get(COOKIE)
-    if not token:
-        return None
-    store = request.app["sessions"]
-    sess = store.get(token)
-    if sess is None or sess["exp"] < time.time():
-        return None
-    return sess
-
-def render(request, sess, title, body, guild=None, section=None):
-    user = {"name": sess["name"], "avatar": sess["avatar"]} if sess else None
-    guild_ctx = None
-    if guild:
-        guild_ctx = {"id": guild.id, "name": guild.name, "icon": guild.icon.url if guild.icon else None}
-    return webui.layout(title, body, user=user, guild=guild_ctx, section=section)
-
-# Функции маршрутов сайта (index, login, callback, logout, overview, access_get/post, roles_get/post, automod_get/post, tickets_get/post, events_get, general_get/post)
-# ... (полная реализация сайта из предыдущей версии кода)
-''',
-    'vex.cogs.tickets': r'''"""Тикеты: панель создания, приватные каналы, управление."""
-import asyncio
-import io
-from time import time as now_ts
-from zoneinfo import ZoneInfo
-import discord
-from discord import app_commands
-from discord.ext import commands
-
-from .. import config, embeds
-from ..checks import access, member_has_access
-
-TZ = ZoneInfo(config.TIMEZONE)
-
-class TicketReasonModal(discord.ui.Modal):
-    def __init__(self, cog, type_key, label):
-        super().__init__(title=label[:45])
-        self.cog = cog
-        self.type_key = type_key
-        self.reason = discord.ui.TextInput(label="Опишите ваш вопрос", style=discord.TextStyle.paragraph, required=True)
-        self.add_item(self.reason)
-    async def on_submit(self, interaction):
-        await self.cog.create_ticket(interaction, self.type_key, str(self.reason))
-
-class TicketSelect(discord.ui.Select):
-    def __init__(self, types):
-        options = [discord.SelectOption(label=t["label"], value=t["key"], emoji=t["emoji"]) for t in types]
-        super().__init__(placeholder="Выберите тип обращения...", options=options, min_values=1, max_values=1)
-    async def callback(self, interaction):
-        cog = interaction.client.get_cog("Tickets")
-        types = await cog.get_types(interaction.guild.id)
-        label = next((t["label"] for t in types if t["key"] == self.values[0]), "Обращение")
-        await interaction.response.send_modal(TicketReasonModal(cog, self.values[0], label))
-
-class TicketPanelView(discord.ui.View):
-    def __init__(self, types=None):
-        super().__init__(timeout=None)
-        self.add_item(TicketSelect(types or []))
-
-class TicketControlView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        @discord.ui.button(label="Закрыть", emoji="🔒", style=discord.ButtonStyle.danger)
-        async def close_button(self, interaction, button):
-            await interaction.client.get_cog("Tickets").on_close_button(interaction)
-        @discord.ui.button(label="Взять в работу", emoji="✋", style=discord.ButtonStyle.success)
-        async def claim_button(self, interaction, button):
-            await interaction.client.get_cog("Tickets").on_claim_button(interaction)
-
-class Tickets(commands.Cog):
-    ticket = app_commands.Group(name="ticket", description="Система тикетов", guild_only=True)
-    def __init__(self, bot):
-        self.bot = bot
-    async def cog_load(self):
-        self.bot.add_view(TicketPanelView())
-        self.bot.add_view(TicketControlView())
-    async def get_types(self, guild_id):
-        raw = await self.bot.db.get_setting(guild_id, "ticket_types")
-        if raw:
-            try:
-                import json
-                return json.loads(raw)
-            except:
-                pass
-        return []
-    async def send_panel(self, channel, title=None, description=None):
-        types = await self.get_types(channel.guild.id)
-        await channel.send(embed=embeds.make(title or "🎫 Центр поддержки", description or "Выбери тип обращения"), view=TicketPanelView(types))
-    async def create_ticket(self, interaction, type_key, reason):
-        guild = interaction.guild
-        user = interaction.user
-        category_id = await self.bot.db.get_setting(guild.id, "ticket_category")
-        category = guild.get_channel(int(category_id)) if category_id else None
-        if not isinstance(category, discord.CategoryChannel):
-            await interaction.followup.send(embed=embeds.err("Тикеты ещё не настроены."), ephemeral=True)
-            return
-        ticket_id = await self.bot.db.insert(
-            "INSERT INTO tickets(guild_id, user_id, type, reason, created_at) VALUES(?,?,?,?,?)",
-            (guild.id, user.id, type_key, reason, int(now_ts())),
-        )
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, manage_channels=True, manage_messages=True),
-        }
-        try:
-            channel = await guild.create_text_channel(name=f"ticket-{ticket_id}", category=category, overwrites=overwrites)
-        except:
-            await self.bot.db.execute("DELETE FROM tickets WHERE id=?", (ticket_id,))
-            await interaction.followup.send(embed=embeds.err("Не удалось создать канал."), ephemeral=True)
-            return
-        await self.bot.db.execute("UPDATE tickets SET channel_id=? WHERE id=?", (channel.id, ticket_id))
-        await channel.send(content=user.mention, embed=embeds.make(f"Тикет #{ticket_id}", reason))
-        await interaction.followup.send(embed=embeds.ok(f"Тикет создан: {channel.mention}"), ephemeral=True)
-    async def on_close_button(self, interaction):
-        await interaction.response.send_message(embed=embeds.warn("Закрываю тикет..."), ephemeral=True)
-        await self.close_ticket(interaction.channel, interaction.user)
-    async def on_claim_button(self, interaction):
-        await interaction.response.send_message(embed=embeds.info("Взял тикет в работу."), ephemeral=True)
-    async def close_ticket(self, channel, closer):
-        await self.bot.db.execute("UPDATE tickets SET status='closed' WHERE channel_id=?", (channel.id,))
-        await channel.send(embed=embeds.ok("Тикет закрыт."))
-        await asyncio.sleep(5)
-        try:
-            await channel.delete(reason="Тикет закрыт")
-        except:
-            pass
-    @ticket.command(name="panel", description="Отправить панель создания тикетов")
-    @access("ticket_admin")
-    async def panel(self, interaction, channel: discord.TextChannel | None = None, title: str | None = None, description: str | None = None):
-        channel = channel or interaction.channel
-        await self.send_panel(channel, title, description)
-        await interaction.response.send_message(embed=embeds.ok("Панель отправлена."), ephemeral=True)
-''',
-    'vex.cogs.wipe': r'''"""Вайп-реакты: сбор участников перед событием."""
-import re
 from datetime import datetime
 from time import time as now_ts
 from zoneinfo import ZoneInfo
+
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 from .. import config, embeds
-from ..checks import access, member_has_access
+from ..checks import is_admin
 
 TZ = ZoneInfo(config.TIMEZONE)
-LINK_RE = re.compile(r"channels/(?:\d+|@me)/(\d+)/(\d+)")
-STATUSES = {"accepted": ("✅", "Придут"), "declined": ("❌", "Не придут"), "late": ("🕒", "Опоздают")}
-REMIND_BEFORE = 15 * 60
 
-class ReasonModal(discord.ui.Modal):
-    def __init__(self, cog, ev, status):
-        super().__init__(title="Причина")
+SECTIONS = [
+    ("access", "Доступ к командам", "🔐"),
+    ("roles", "Роли", "🎭"),
+    ("automod", "Автомодерация", "🛡️"),
+    ("tickets", "Тикеты", "🎫"),
+    ("events", "События", "📝"),
+    ("general", "Общие", "⚙️"),
+    ("help", "Помощь", "❓"),
+]
+
+
+def fmt_ts(ts):
+    try:
+        return datetime.fromtimestamp(int(ts), TZ).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(ts)
+
+
+def clamp(value, low, high, default):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def pick_one(value, valid):
+    text = str(value or "")
+    return int(text) if text.isdigit() and int(text) in valid else None
+
+
+# --------------------------------------------------------------------------- главное меню
+class MainView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
         self.cog = cog
-        self.ev_id = ev["message_id"]
-        self.status = status
-        self.reason = discord.ui.TextInput(label="Комментарий", required=False)
-        self.add_item(self.reason)
-    async def on_submit(self, interaction):
-        await self.cog.save_response(self.ev_id, interaction.user.id, self.status, str(self.reason))
-        await interaction.response.defer()
-        await self.cog.refresh_message(interaction.message, self.ev_id)
 
-class WipeView(discord.ui.View):
-    def __init__(self, closed=False):
-        super().__init__(timeout=None)
-        @discord.ui.button(label="Приду", emoji="✅", style=discord.ButtonStyle.success)
-        async def accept(self, interaction, button):
-            await self.cog.handle_response(interaction, "accepted")
-        @discord.ui.button(label="Не приду", emoji="❌", style=discord.ButtonStyle.danger)
-        async def decline(self, interaction, button):
-            await self.cog.handle_response(interaction, "declined")
-        @discord.ui.button(label="Опоздаю", emoji="🕒", style=discord.ButtonStyle.secondary)
-        async def late(self, interaction, button):
-            await self.cog.handle_response(interaction, "late")
-        @discord.ui.button(emoji="📝", style=discord.ButtonStyle.primary)
-        async def settings(self, interaction, button):
-            await self.cog.handle_settings(interaction)
+    async def open_section(self, interaction, key):
+        await self.cog.show_section(interaction, key)
 
-class Wipe(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-    async def cog_load(self):
-        self.bot.add_view(WipeView())
-    async def handle_response(self, interaction, status):
-        await interaction.response.defer()
-        await self.save_response(interaction.message.id, interaction.user.id, status, None)
-        await self.refresh_message(interaction.message, interaction.message.id)
-    async def save_response(self, message_id, user_id, status, reason):
-        await self.bot.db.execute(
-            "INSERT OR REPLACE INTO wipe_responses(message_id, user_id, status, reason) VALUES(?,?,?,?)",
-            (message_id, user_id, status, reason),
-        )
-    async def refresh_message(self, message, message_id):
-        ev = await self.bot.db.fetchone("SELECT * FROM wipe_events WHERE message_id=?", (message_id,))
-        if ev:
-            rows = await self.bot.db.fetchall("SELECT status FROM wipe_responses WHERE message_id=?", (message_id,))
-            embed = embeds.make(f"{'🔒' if ev['closed'] else '📝'} {ev['title']}", f"Событие: <t:{ev['ts']}:F>")
-            for st, (emoji, label) in STATUSES.items():
-                count = sum(1 for r in rows if r["status"] == st)
-                embed.add_field(name=f"{emoji} {label}", value=str(count), inline=True)
-            try:
-                await message.edit(embed=embed, view=WipeView(ev["closed"]))
-            except:
-                pass
-    @app_commands.command(name="wipereact", description="Создать событие с реакциями")
-    @access("wipe")
-    async def wipereact(self, interaction, title: str, date: str, time: str):
-        dt = datetime.strptime(f"{date} {time}", "%d.%m.%Y %H:%M")
-        if dt.timestamp() < now_ts():
-            await interaction.response.send_message(embed=embeds.err("Дата в прошлом."), ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        message = await interaction.channel.send(embed=embeds.make(title, "Отметьтесь:"), view=WipeView())
-        await self.bot.db.execute(
-            "INSERT INTO wipe_events(message_id, guild_id, channel_id, creator_id, title, ts) VALUES(?,?,?,?,?,?)",
-            (message.id, interaction.guild.id, interaction.channel.id, interaction.user.id, title, int(dt.timestamp())),
-        )
-        await interaction.followup.send(embed=embeds.ok("Событие создано."), ephemeral=True)
-''',
-    'vex.cogs.automod': r'''"""Автомодерация ссылок."""
-import re
-from datetime import timedelta
-from time import time as now_ts
-import discord
-from discord import app_commands
-from discord.ext import commands
+    @discord.ui.button(label="Доступ", emoji="🔐", style=discord.ButtonStyle.primary, row=0)
+    async def b_access(self, interaction, button):
+        await self.open_section(interaction, "access")
 
-from .. import config, embeds
-from ..checks import access
+    @discord.ui.button(label="Роли", emoji="🎭", style=discord.ButtonStyle.primary, row=0)
+    async def b_roles(self, interaction, button):
+        await self.open_section(interaction, "roles")
 
-URL_RE = re.compile(r"(?:https?://|www\.)[^\\s<>()\\[\\]]+")
+    @discord.ui.button(label="Автомод", emoji="🛡️", style=discord.ButtonStyle.primary, row=0)
+    async def b_automod(self, interaction, button):
+        await self.open_section(interaction, "automod")
 
-class AutoMod(commands.Cog):
-    automod = app_commands.Group(name="automod", description="Автомодерация ссылок", guild_only=True)
-    def __init__(self, bot):
-        self.bot = bot
-    async def check_message(self, message):
-        if message.author.bot or not message.content: return
-        if await self.bot.db.get_setting(message.guild.id, "automod_enabled", "1") == "0": return
-        link = URL_RE.search(message.content)
-        if link:
-            await message.delete()
-            await message.channel.send(embed=embeds.warn(f"{message.author.mention}, ссылки запрещены."))
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        await self.check_message(message)
-    @automod.command(name="toggle", description="Включить/выключить автомодерацию")
-    @access("automod")
-    async def toggle(self, interaction, enabled: bool):
-        await self.bot.db.set_setting(interaction.guild.id, "automod_enabled", "1" if enabled else "0")
-        await interaction.response.send_message(embed=embeds.ok(f"Автомодерация {'включена' if enabled else 'выключена'}."), ephemeral=True)
-''',
-    'vex.cogs.roles': r'''"""Управление ролями и авто-выдача."""
-import discord
-from discord import app_commands
-from discord.ext import commands
+    @discord.ui.button(label="Тикеты", emoji="🎫", style=discord.ButtonStyle.primary, row=1)
+    async def b_tickets(self, interaction, button):
+        await self.open_section(interaction, "tickets")
 
-from .. import config, embeds
-from ..checks import access, is_admin
+    @discord.ui.button(label="События", emoji="📝", style=discord.ButtonStyle.primary, row=1)
+    async def b_events(self, interaction, button):
+        await self.open_section(interaction, "events")
 
-class RoleTools(commands.Cog):
-    role = app_commands.Group(name="role", description="Управление ролями", guild_only=True)
-    def __init__(self, bot):
-        self.bot = bot
-    @role.command(name="add", description="Выдать роль")
-    @access("role")
-    async def add(self, interaction, member: discord.Member, role: discord.Role):
-        if role >= interaction.guild.me.top_role:
-            await interaction.response.send_message(embed=embeds.err("Роль выше моей."), ephemeral=True)
-            return
-        await member.add_roles(role)
-        await interaction.response.send_message(embed=embeds.ok(f"Выдана роль {role.name}."), ephemeral=True)
-    @role.command(name="remove", description="Снять роль")
-    @access("role")
-    async def remove(self, interaction, member: discord.Member, role: discord.Role):
-        await member.remove_roles(role)
-        await interaction.response.send_message(embed=embeds.ok(f"Снята роль {role.name}."), ephemeral=True)
-    autorole = app_commands.Group(name="autorole", description="Авто-выдача ролей", guild_only=True)
-    @autorole.command(name="add", description="Добавить роль в авто-выдачу")
-    @access("autorole")
-    async def add(self, interaction, role: discord.Role):
-        await self.bot.db.add_target(interaction.guild.id, "autorole_member", role.id)
-        await interaction.response.send_message(embed=embeds.ok(f"Роль {role.name} добавлена в авто-выдачу."), ephemeral=True)
-''',
-    'vex.cogs.staff': r'''"""Сообщения от имени бота (/say)."""
-import discord
-from discord import app_commands
-from discord.ext import commands
+    @discord.ui.button(label="Общие", emoji="⚙️", style=discord.ButtonStyle.primary, row=1)
+    async def b_general(self, interaction, button):
+        await self.open_section(interaction, "general")
 
-from .. import config, embeds
-from ..checks import access
+    @discord.ui.button(label="Помощь", emoji="❓", style=discord.ButtonStyle.secondary, row=2)
+    async def b_help(self, interaction, button):
+        await self.open_section(interaction, "help")
 
-class SayModal(discord.ui.Modal):
-    def __init__(self, cog, channel):
-        super().__init__(title="Сообщение от имени VEX")
+    @discord.ui.button(label="Закрыть", emoji="✖️", style=discord.ButtonStyle.danger, row=2)
+    async def b_close(self, interaction, button):
+        await interaction.response.edit_message(embed=embeds.info("Панель закрыта."), view=None)
+
+
+class BackView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
         self.cog = cog
-        self.channel = channel
-        self.text = discord.ui.TextInput(label="Текст сообщения", style=discord.TextStyle.paragraph, required=True)
-        self.add_item(self.text)
+
+    @discord.ui.button(label="Назад", emoji="⬅️", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction, button):
+        await self.cog.show_main(interaction)
+
+    @discord.ui.button(label="Закрыть", emoji="✖️", style=discord.ButtonStyle.danger)
+    async def close(self, interaction, button):
+        await interaction.response.edit_message(embed=embeds.info("Панель закрыта."), view=None)
+
+
+# --------------------------------------------------------------------------- доступ
+class AccessRoleSelect(discord.ui.Select):
+    def __init__(self, key, roles, selected):
+        options = [
+            discord.SelectOption(label=role.name[:100], value=str(role.id), default=role.id in selected)
+            for role in roles[:25]
+        ]
+        super().__init__(
+            placeholder=f"Роли для «{config.COMMAND_KEYS[key]}»",
+            options=options or [discord.SelectOption(label="На сервере нет ролей", value="0")],
+            min_values=0,
+            max_values=len(options) or 1,
+            disabled=not options,
+        )
+        self.key = key
+
+    async def callback(self, interaction):
+        pass  # состояние собираем при сохранении
+
+
+class AccessSectionView(BackView):
+    def __init__(self, cog, roles, selected):
+        super().__init__(cog)
+        self.roles = roles
+        self.selected = selected
+        for key in config.COMMAND_KEYS:
+            if len(self.children) >= 24:
+                break
+            self.add_item(AccessRoleSelect(key, roles, set(selected.get(key, []))))
+
+    def _selected_map(self):
+        out = {}
+        for child in self.children:
+            if isinstance(child, AccessRoleSelect):
+                out[child.key] = [int(v) for v in child.values if v.isdigit()]
+        return out
+
+    @discord.ui.button(label="Сохранить", emoji="💾", style=discord.ButtonStyle.success, row=4)
+    async def save(self, interaction, button):
+        await self.cog.save_access(interaction, self._selected_map())
+
+
+# --------------------------------------------------------------------------- роли
+class RoleSelect(discord.ui.Select):
+    def __init__(self, kind, roles, selected, placeholder):
+        options = [
+            discord.SelectOption(label=role.name[:100], value=str(role.id), default=role.id in selected)
+            for role in roles[:25]
+        ]
+        super().__init__(
+            placeholder=placeholder,
+            options=options or [discord.SelectOption(label="На сервере нет ролей", value="0")],
+            min_values=0,
+            max_values=len(options) or 1,
+            disabled=not options,
+            row=None,
+        )
+        self.kind = kind
+
+    async def callback(self, interaction):
+        pass
+
+
+class RolesSectionView(BackView):
+    def __init__(self, cog, roles, member_sel, bot_sel, manageable_sel):
+        super().__init__(cog)
+        self.add_item(RoleSelect("autorole_member", roles, set(member_sel), "Роли новым участникам"))
+        self.add_item(RoleSelect("autorole_bot", roles, set(bot_sel), "Роли новым ботам"))
+        self.add_item(RoleSelect("manageable", roles, set(manageable_sel), "Роли, которые можно выдавать"))
+
+    def _selected_map(self):
+        out = {}
+        for child in self.children:
+            if isinstance(child, RoleSelect):
+                out[child.kind] = [int(v) for v in child.values if v.isdigit()]
+        return out
+
+    @discord.ui.button(label="Сохранить", emoji="💾", style=discord.ButtonStyle.success, row=4)
+    async def save(self, interaction, button):
+        await self.cog.save_roles(interaction, self._selected_map())
+
+
+# --------------------------------------------------------------------------- автомодерация
+class AutomodModal(discord.ui.Modal):
+    def __init__(self, cog, enabled, strikes, timeout, domains_text):
+        super().__init__(title="Автомодерация: параметры")
+        self.cog = cog
+        self.enabled = discord.ui.TextInput(label="Включена (да/нет)", default="да" if enabled else "нет", max_length=3)
+        self.strikes = discord.ui.TextInput(label="Нарушений до тайм-аута (1-10)", default=str(strikes), max_length=2)
+        self.timeout = discord.ui.TextInput(label="Тайм-аут, мин (0-1440)", default=str(timeout), max_length=4)
+        self.domains = discord.ui.TextInput(
+            label="Разрешённые домены (по одному в строке)",
+            style=discord.TextStyle.paragraph,
+            default=domains_text,
+            required=False,
+            max_length=2000,
+        )
+        for item in (self.enabled, self.strikes, self.timeout, self.domains):
+            self.add_item(item)
+
     async def on_submit(self, interaction):
-        await interaction.response.defer(ephemeral=True)
-        await self.channel.send(content=str(self.text))
-        await interaction.followup.send(embed=embeds.ok("Отправлено."), ephemeral=True)
+        enabled = str(self.enabled).strip().lower() in ("да", "yes", "1", "true", "вкл")
+        strikes = clamp(str(self.strikes), 1, 10, 3)
+        timeout = clamp(str(self.timeout), 0, 1440, 10)
+        domains = [d.strip().lower() for d in str(self.domains).splitlines() if d.strip()][:200]
+        await self.cog.save_automod(interaction, enabled, strikes, timeout, domains)
 
-class Staff(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-    @app_commands.command(name="say", description="Отправить сообщение от имени бота")
-    @access("say")
-    async def say(self, interaction, channel: discord.TextChannel, text: str):
-        await interaction.response.send_modal(SayModal(self, channel))
-''',
-    'vex.cogs.dashboard': r'''"""Единый дашборд настроек вместо разрозненных команд."""
-import discord
-from discord import ui, app_commands
-from discord.ext import commands
 
-from .. import config, embeds
-from ..checks import admin_only
-from ..db import Database
+class AutomodSelect(discord.ui.Select):
+    def __init__(self, kind, items, selected, placeholder):
+        options = [
+            discord.SelectOption(label=item.name[:100], value=str(item.id), default=item.id in selected)
+            for item in items[:25]
+        ]
+        super().__init__(
+            placeholder=placeholder,
+            options=options or [discord.SelectOption(label="Нет вариантов", value="0")],
+            min_values=0,
+            max_values=len(options) or 1,
+            disabled=not options,
+        )
+        self.kind = kind
 
-class DashboardModal(ui.Modal, title='Настройки VEX'):
-    def __init__(self, bot, page: str):
-        super().__init__(timeout=None)
-        self.bot = bot
-        self.page = page
-        # Поля для разных вкладок будут добавляться динамически
-        if page == 'tickets':
-            self.category = ui.TextInput(label='ID категории тикетов', placeholder='Например: 123456789')
-            self.log_channel = ui.TextInput(label='ID лог-канала тикетов', placeholder='ID канала для транскриптов')
-            self.add_item(self.category)
-            self.add_item(self.log_channel)
-        elif page == 'roles':
-            pass  # Реализация вкладки ролей
-        elif page == 'automod':
-            self.enabled = ui.TextInput(label='Включить автомодерацию (1/0)', placeholder='1 - вкл, 0 - выкл')
-            self.strikes = ui.TextInput(label='Нарушений до тайм-аута', placeholder='3')
-            self.timeout = ui.TextInput(label='Тайм-аут, минут', placeholder='10')
-            self.add_item(self.enabled)
-            self.add_item(self.strikes)
-            self.add_item(self.timeout)
-        elif page == 'access':
-            pass  # Реализация вкладки доступов
+    async def callback(self, interaction):
+        pass
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        db = self.bot.db
-        gid = interaction.guild.id
-        if self.page == 'tickets':
-            if self.category.value.isdigit():
-                await db.set
+
+class AutomodSectionView(BackView):
+    def __init__(self, cog, roles, channels, bypass, ignore):
+        super().__init__(cog)
+        self.add_item(AutomodSelect("automod_bypass", roles, set(bypass), "Роли без проверки"))
+        self.add_item(AutomodSelect("automod_ignore_channel", channels, set(ignore), "Каналы без проверки"))
+
+    def _selected_map(self):
+        out = {}
+        for child in self.children:
+            if isinstance(child, AutomodSelect):
+                out[child.kind] = [int(v) for v in child.values if v.isdigit()]
+        return out
+
+    @discord.ui.button(label="Параметры", emoji="🛠️", style=discord.ButtonStyle.primary, row=3)
+    async def params(self, interaction, button):
+        await self.cog.open_automod_modal(interaction)
+
+    @discord.ui.button(label="Сохранить списки", emoji="💾", style=discord.ButtonStyle.success, row=4)
+    async def save(self, interaction, button):
+        await self.cog.save_automod_lists(interaction, self._selected_map())
+
+
+# --------------------------------------------------------------------------- тикеты
+class TicketsModal(discord.ui.Modal):
+    def __init__(self, cog, max_open, types_text):
+        super().__init__(title="Тикеты: лимит и типы")
+        self.cog = cog
+        self.max_open = discord.ui.TextInput(label="Тикетов на человека (1-5)", default=str(max_open), max_length=1)
+        self.types = discord.ui.TextInput(
+            label="Типы: эмодзи | Название | Описание",
+            style=discord.TextStyle.paragraph,
+            default=types_text,
+            max_length=4000,
+        )
+        self.add_item(self.max_open)
+        self.add_item(self.types)
+
+    async def on_submit(self, interaction):
+        max_open = clamp(str(self.max_open), 1, 5, 1)
+        types = []
+        for line in str(self.types).splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 2:
+                emoji, label = parts[0], parts[1]
+                desc = " | ".join(parts[2:]) if len(parts) > 2 else ""
+            else:
+                emoji, label, desc = "", parts[0], ""
+            if not label:
+                continue
+            types.append({
+                "key": f"t{len(types)}",
+                "slug": "ticket",
+                "label": label[:100],
+                "emoji": emoji[:8],
+                "description": desc[:100],
+            })
+            if len(types) >= 25:
+                break
+        if not types:
+            await interaction.response.send_message(
+                embed=embeds.err("Нужен хотя бы один тип обращения."), ephemeral=True
+            )
+            return
+        await self.cog.save_tickets_modal(interaction, max_open, types)
+
+
+class TicketsSectionView(BackView):
+    def __init__(self, cog, categories, channels, roles, category_sel, log_sel, support_sel):
+        super().__init__(cog)
+        self.add_item(ChannelSelect("ticket_category", categories, category_sel, "Категория для тикетов"))
+        self.add_item(ChannelSelect("ticket_log", channels, log_sel, "Лог-канал тикетов"))
+        self.add_item(AutomodSelect("ticket_support", roles, set(support_sel), "Роли поддержки"))
+
+    def _selected_map(self):
+        out = {}
+        for child in self.children:
+            if isinstance(child, (ChannelSelect, AutomodSelect)):
+                out[child.kind] = [int(v) for v in child.values if v.isdigit()]
+        return out
+
+    @discord.ui.button(label="Лимит и типы", emoji="🛠️", style=discord.ButtonStyle.primary, row=3)
+    async def modal(self, interaction, button):
+        await self.cog.open_tickets_modal(interaction)
+
+    @discord.ui.button(label="Отправить панель", emoji="📨", style=discord.ButtonStyle.primary, row=3)
+    async def send_panel(self, interaction, button):
+        await self.cog.send_ticket_panel(interaction)
+
+    @discord.ui.button(label="Сохранить", emoji="💾", style=discord.ButtonStyle.success, row=4)
+    async def save(self, interaction, button):
+        await self.cog.save_tickets(interaction, self._selected_map())
+
+
+class ChannelSelect(discord.ui.Select):
+    def __init__(self, kind, items, selected, placeholder):
+        options = [
+            discord.SelectOption(label=item.name[:100], value=str(item.id), default=item.id == selected)
+            for item in items[:25]
+        ]
+        super().__init__(
+            placeholder=placeholder,
+            options=options or [discord.SelectOption(label="Нет вариантов", value="0")],
+            min_values=0,
+            max_values=1,
+            disabled=not options,
+        )
+        self.kind = kind
+
+    async def callback(self, interaction):
+        pass
+
+
+# --------------------------------------------------------------------------- события
+class EventsSectionView(BackView):
+    def __init__(self, cog, events):
+        super().__init__(cog)
+        self.events = events
+        for index, event in enumerate(events[:20]):
+            self.add_item(EventButton(cog, event, index))
+
+
+class EventButton(discord.ui.Button):
+    def __init__(self, cog, event, index):
+        label = (event["title"] or "Событие")[:60]
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, row=index // 5)
+        self.cog = cog
+        self.event = event
+
+    async def callback(self, interaction):
+        await self.cog.open_event(interaction, self.event)
+
+
+class EventActionView(discord.ui.View):
+    def __init__(self, cog, event):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.event = event
+
+    @discord.ui.button(label="
