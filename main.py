@@ -45,7 +45,7 @@ _SOURCES = {
 import os
 from pathlib import Path
 
-try:  # .env нужен только для локального запуска; на хостинге переменные задаются в панели
+try:
     from dotenv import load_dotenv
 
     load_dotenv()
@@ -60,23 +60,19 @@ def _int(name: str, default: int = 0) -> int:
         return default
 
 
-# --- Окружение -------------------------------------------------------------
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GUILD_ID = _int("GUILD_ID")  # ID сервера: команды появятся сразу. Пусто = глобальная синхронизация (до часа)
-# Здесь лежит база. На bothost постоянные данные хранятся в /app/data — он выбирается сам, если существует.
+GUILD_ID = _int("GUILD_ID")
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if Path("/app").is_dir() else "./data"))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
-# --- Оформление ------------------------------------------------------------
 BRAND = "VEX"
 FOOTER = "VEX • Clan Control"
-COLOR_MAIN = 0x8B5CF6  # фиолетовый
-COLOR_DARK = 0x6D28D9  # тёмно-фиолетовый (закрытые события)
+COLOR_MAIN = 0x8B5CF6
+COLOR_DARK = 0x6D28D9
 COLOR_OK = 0x22C55E
 COLOR_ERR = 0xEF4444
 COLOR_WARN = 0xF59E0B
 
-# --- Тикеты: типы обращений (меню на панели). Меняй как угодно, до 25 штук. ---
 TICKET_TYPES = [
     {"key": "join", "slug": "join", "label": "Вступление в клан", "emoji": "🛡️",
      "description": "Подать заявку на вступление"},
@@ -90,7 +86,6 @@ TICKET_TYPES = [
      "description": "Всё остальное"},
 ]
 
-# --- Автомодерация: домены, которые разрешены всегда ------------------------
 DEFAULT_ALLOWED_DOMAINS = (
     "tenor.com",
     "giphy.com",
@@ -98,7 +93,6 @@ DEFAULT_ALLOWED_DOMAINS = (
     "media.discordapp.net",
 )
 
-# --- Ключи команд для системы доступа (/perms) -------------------------------
 COMMAND_KEYS = {
     "ticket_admin": "Панель и настройка тикетов",
     "ticket_manage": "Работа с тикетами (закрыть, добавить, взять)",
@@ -151,20 +145,17 @@ CREATE TABLE IF NOT EXISTS settings (
     value    TEXT    NOT NULL,
     PRIMARY KEY (guild_id, key)
 );
-
 CREATE TABLE IF NOT EXISTS guild_targets (
     guild_id  INTEGER NOT NULL,
     kind      TEXT    NOT NULL,
     target_id INTEGER NOT NULL,
     PRIMARY KEY (guild_id, kind, target_id)
 );
-
 CREATE TABLE IF NOT EXISTS allowed_domains (
     guild_id INTEGER NOT NULL,
     domain   TEXT    NOT NULL,
     PRIMARY KEY (guild_id, domain)
 );
-
 CREATE TABLE IF NOT EXISTS tickets (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id   INTEGER NOT NULL,
@@ -177,7 +168,6 @@ CREATE TABLE IF NOT EXISTS tickets (
     created_at INTEGER NOT NULL,
     closed_at  INTEGER
 );
-
 CREATE TABLE IF NOT EXISTS wipe_events (
     message_id   INTEGER PRIMARY KEY,
     guild_id     INTEGER NOT NULL,
@@ -193,7 +183,6 @@ CREATE TABLE IF NOT EXISTS wipe_events (
     closed       INTEGER NOT NULL DEFAULT 0,
     reminded     INTEGER NOT NULL DEFAULT 0
 );
-
 CREATE TABLE IF NOT EXISTS wipe_responses (
     message_id INTEGER NOT NULL,
     user_id    INTEGER NOT NULL,
@@ -243,9 +232,7 @@ class Database:
         return await asyncio.to_thread(self._fetch, sql, tuple(params), False)
 
     async def get_setting(self, guild_id, key, default=None):
-        row = await self.fetchone(
-            "SELECT value FROM settings WHERE guild_id=? AND key=?", (guild_id, key)
-        )
+        row = await self.fetchone("SELECT value FROM settings WHERE guild_id=? AND key=?", (guild_id, key))
         return row["value"] if row else default
 
     async def set_setting(self, guild_id, key, value):
@@ -259,9 +246,7 @@ class Database:
         await self.execute("DELETE FROM settings WHERE guild_id=? AND key=?", (guild_id, key))
 
     async def get_targets(self, guild_id, kind):
-        rows = await self.fetchall(
-            "SELECT target_id FROM guild_targets WHERE guild_id=? AND kind=?", (guild_id, kind)
-        )
+        rows = await self.fetchall("SELECT target_id FROM guild_targets WHERE guild_id=? AND kind=?", (guild_id, kind))
         return [r["target_id"] for r in rows]
 
     async def add_target(self, guild_id, kind, target_id):
@@ -273,8 +258,7 @@ class Database:
 
     async def remove_target(self, guild_id, kind, target_id):
         changed = await self.execute(
-            "DELETE FROM guild_targets WHERE guild_id=? AND kind=? AND target_id=?",
-            (guild_id, kind, target_id),
+            "DELETE FROM guild_targets WHERE guild_id=? AND kind=? AND target_id=?", (guild_id, kind, target_id)
         )
         return changed > 0
 
@@ -290,8 +274,7 @@ class Database:
         await self.execute("DELETE FROM allowed_domains WHERE guild_id=?", (guild_id,))
         for domain in domains:
             await self.execute(
-                "INSERT OR IGNORE INTO allowed_domains(guild_id, domain) VALUES(?,?)",
-                (guild_id, domain),
+                "INSERT OR IGNORE INTO allowed_domains(guild_id, domain) VALUES(?,?)", (guild_id, domain)
             )
 ''',
     'vex.checks': r'''"""Система доступа: какая роль может пользоваться какой командой."""
@@ -337,7 +320,7 @@ def admin_only():
 
     return app_commands.check(predicate)
 ''',
-    'vex.bot': r'''"""Ядро бота: интенты, загрузка модулей, обработка ошибок команд, логирование на сервер."""
+    'vex.bot': r'''"""Ядро бота."""
 import logging
 
 import discord
@@ -364,20 +347,16 @@ EXTENSIONS = (
 class VexTree(app_commands.CommandTree):
     async def on_error(self, interaction, error):
         if isinstance(error, NoAccess):
-            if error.admin_only:
-                text = "Эта команда доступна только администраторам."
-            else:
-                text = (
-                    "У тебя нет доступа к этой команде.\n"
-                    "Администратор может выдать его через `/panel` → «Доступ»."
-                )
+            text = "Эта команда доступна только администраторам." if error.admin_only else (
+                "У тебя нет доступа к этой команде.\n"
+                "Администратор может выдать его через `/panel` → «Доступ»."
+            )
             message = embeds.err(text, "Нет доступа")
         elif isinstance(error, app_commands.CheckFailure):
             message = embeds.err("Эту команду нельзя использовать здесь.", "Недоступно")
         else:
             log.error("Ошибка в команде %s", getattr(interaction.command, "name", "?"), exc_info=error)
             message = embeds.err("Что-то пошло не так. Подробности записаны в логи бота.")
-
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(embed=message, ephemeral=True)
@@ -406,7 +385,6 @@ class VexBot(commands.Bot):
         log.info("База данных: %s", self.db.path.resolve())
         for extension in EXTENSIONS:
             await self.load_extension(extension)
-
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             self.tree.copy_global_to(guild=guild)
@@ -436,7 +414,7 @@ class VexBot(commands.Bot):
             log.warning("Не удалось отправить лог в канал %s", channel_id)
 ''',
     'vex.cogs': r'''''',
-    'vex.cogs.panel': r'''"""Единая админ-панель /panel: всё управление ботом в одном месте, кнопками."""
+    'vex.cogs.panel': r'''"""Единая админ-панель /panel: всё управление ботом через модалки (надёжно и без селектов)."""
 import json
 from datetime import datetime
 from time import time as now_ts
@@ -467,9 +445,63 @@ def clamp(value, low, high, default):
     return max(low, min(high, number))
 
 
-def pick_one(value, valid):
-    text = str(value or "")
-    return int(text) if text.isdigit() and int(text) in valid else None
+def parse_ids(text):
+    out = []
+    for piece in str(text or "").replace(";", ",").split(","):
+        piece = piece.strip().strip("<@&>").strip("<#>")
+        if piece.isdigit() and int(piece) not in out:
+            out.append(int(piece))
+    return out
+
+
+def ids_line(ids):
+    return ", ".join(str(i) for i in ids)
+
+
+def parse_key_values(text):
+    """Строки вида 'ключ = 1,2,3' -> {ключ: [id, ...]}."""
+    out = {}
+    for line in str(text or "").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            out[key] = parse_ids(value)
+    return out
+
+
+def parse_types(text):
+    types = []
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 2:
+            emoji, label = parts[0], parts[1]
+            desc = " | ".join(parts[2:]) if len(parts) > 2 else ""
+        else:
+            emoji, label, desc = "", parts[0], ""
+        if not label:
+            continue
+        types.append({
+            "key": f"t{len(types)}",
+            "slug": "ticket",
+            "label": label[:100],
+            "emoji": emoji[:8],
+            "description": desc[:100],
+        })
+        if len(types) >= 25:
+            break
+    return types
+
+
+async def reply(interaction, embed):
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class MainView(discord.ui.View):
@@ -477,36 +509,29 @@ class MainView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
 
-    async def open_section(self, interaction, key):
-        await self.cog.show_section(interaction, key)
-
     @discord.ui.button(label="Доступ", emoji="🔐", style=discord.ButtonStyle.primary, row=0)
     async def b_access(self, interaction, button):
-        await self.open_section(interaction, "access")
+        await self.cog.open_access(interaction)
 
     @discord.ui.button(label="Роли", emoji="🎭", style=discord.ButtonStyle.primary, row=0)
     async def b_roles(self, interaction, button):
-        await self.open_section(interaction, "roles")
+        await self.cog.open_roles(interaction)
 
     @discord.ui.button(label="Автомод", emoji="🛡️", style=discord.ButtonStyle.primary, row=0)
     async def b_automod(self, interaction, button):
-        await self.open_section(interaction, "automod")
+        await self.cog.open_automod(interaction)
 
     @discord.ui.button(label="Тикеты", emoji="🎫", style=discord.ButtonStyle.primary, row=1)
     async def b_tickets(self, interaction, button):
-        await self.open_section(interaction, "tickets")
+        await self.cog.open_tickets(interaction)
 
     @discord.ui.button(label="События", emoji="📝", style=discord.ButtonStyle.primary, row=1)
     async def b_events(self, interaction, button):
-        await self.open_section(interaction, "events")
+        await self.cog.open_events(interaction)
 
     @discord.ui.button(label="Общие", emoji="⚙️", style=discord.ButtonStyle.primary, row=1)
     async def b_general(self, interaction, button):
-        await self.open_section(interaction, "general")
-
-    @discord.ui.button(label="Помощь", emoji="❓", style=discord.ButtonStyle.secondary, row=2)
-    async def b_help(self, interaction, button):
-        await self.open_section(interaction, "help")
+        await self.cog.open_general(interaction)
 
     @discord.ui.button(label="Закрыть", emoji="✖️", style=discord.ButtonStyle.danger, row=2)
     async def b_close(self, interaction, button):
@@ -518,251 +543,162 @@ class BackView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
 
-    @discord.ui.button(label="Назад", emoji="⬅️", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Назад", emoji="⬅️", style=discord.ButtonStyle.secondary)
     async def back(self, interaction, button):
         await self.cog.show_main(interaction)
 
-    @discord.ui.button(label="Закрыть", emoji="✖️", style=discord.ButtonStyle.danger, row=4)
+    @discord.ui.button(label="Закрыть", emoji="✖️", style=discord.ButtonStyle.danger)
     async def close(self, interaction, button):
         await interaction.response.edit_message(embed=embeds.info("Панель закрыта."), view=None)
 
 
-class AccessRoleSelect(discord.ui.Select):
-    def __init__(self, key, roles, selected):
-        options = [
-            discord.SelectOption(label=role.name[:100], value=str(role.id), default=role.id in selected)
-            for role in roles[:25]
-        ]
-        super().__init__(
-            placeholder=f"Роли для «{config.COMMAND_KEYS[key]}»"[:100],
-            options=options or [discord.SelectOption(label="На сервере нет ролей", value="0")],
-            min_values=0,
-            max_values=len(options) or 1,
-            disabled=not options,
+class AccessModal(discord.ui.Modal):
+    def __init__(self, cog, text):
+        super().__init__(title="Доступ к командам")
+        self.cog = cog
+        self.data = discord.ui.TextInput(
+            label="ключ = ID ролей через запятую",
+            style=discord.TextStyle.paragraph,
+            default=text,
+            required=False,
+            max_length=4000,
         )
-        self.key = key
+        self.add_item(self.data)
 
-    async def callback(self, interaction):
-        pass
-
-
-class AccessSectionView(BackView):
-    def __init__(self, cog, roles, selected):
-        super().__init__(cog)
-        self.roles = roles
+    async def on_submit(self, interaction):
+        mapping = parse_key_values(str(self.data))
         for key in config.COMMAND_KEYS:
-            if len(self.children) >= 20:
-                break
-            self.add_item(AccessRoleSelect(key, roles, set(selected.get(key, []))))
-
-    def _selected_map(self):
-        out = {}
-        for child in self.children:
-            if isinstance(child, AccessRoleSelect):
-                out[child.key] = [int(v) for v in child.values if v.isdigit()]
-        return out
-
-    @discord.ui.button(label="Сохранить", emoji="💾", style=discord.ButtonStyle.success, row=3)
-    async def save(self, interaction, button):
-        await self.cog.save_access(interaction, self._selected_map())
+            await self.cog.bot.db.set_targets(interaction.guild.id, f"cmd:{key}", mapping.get(key, []))
+        await reply(interaction, embeds.ok("Доступ к командам обновлён."))
 
 
-class RoleSelect(discord.ui.Select):
-    def __init__(self, kind, roles, selected, placeholder):
-        options = [
-            discord.SelectOption(label=role.name[:100], value=str(role.id), default=role.id in selected)
-            for role in roles[:25]
-        ]
-        super().__init__(
-            placeholder=placeholder[:100],
-            options=options or [discord.SelectOption(label="На сервере нет ролей", value="0")],
-            min_values=0,
-            max_values=len(options) or 1,
-            disabled=not options,
-        )
-        self.kind = kind
+class RolesModal(discord.ui.Modal):
+    def __init__(self, cog, member_text, bot_text, manageable_text):
+        super().__init__(title="Роли")
+        self.cog = cog
+        self.member = discord.ui.TextInput(label="autorole_member (ID через запятую)", default=member_text,
+                                           required=False, max_length=1000)
+        self.bot_roles = discord.ui.TextInput(label="autorole_bot (ID через запятую)", default=bot_text,
+                                              required=False, max_length=1000)
+        self.manageable = discord.ui.TextInput(label="manageable (ID через запятую)", default=manageable_text,
+                                               required=False, max_length=1000)
+        for item in (self.member, self.bot_roles, self.manageable):
+            self.add_item(item)
 
-    async def callback(self, interaction):
-        pass
-
-
-class RolesSectionView(BackView):
-    def __init__(self, cog, roles, member_sel, bot_sel, manageable_sel):
-        super().__init__(cog)
-        self.add_item(RoleSelect("autorole_member", roles, set(member_sel), "Роли новым участникам"))
-        self.add_item(RoleSelect("autorole_bot", roles, set(bot_sel), "Роли новым ботам"))
-        self.add_item(RoleSelect("manageable", roles, set(manageable_sel), "Роли, которые можно выдавать"))
-
-    def _selected_map(self):
-        out = {}
-        for child in self.children:
-            if isinstance(child, RoleSelect):
-                out[child.kind] = [int(v) for v in child.values if v.isdigit()]
-        return out
-
-    @discord.ui.button(label="Сохранить", emoji="💾", style=discord.ButtonStyle.success, row=3)
-    async def save(self, interaction, button):
-        await self.cog.save_roles(interaction, self._selected_map())
+    async def on_submit(self, interaction):
+        gid = interaction.guild.id
+        await self.cog.bot.db.set_targets(gid, "autorole_member", parse_ids(str(self.member)))
+        await self.cog.bot.db.set_targets(gid, "autorole_bot", parse_ids(str(self.bot_roles)))
+        await self.cog.bot.db.set_targets(gid, "manageable", parse_ids(str(self.manageable)))
+        await reply(interaction, embeds.ok("Роли обновлены."))
 
 
 class AutomodModal(discord.ui.Modal):
-    def __init__(self, cog, enabled, strikes, timeout, domains_text):
-        super().__init__(title="Автомодерация: параметры")
+    def __init__(self, cog, enabled, strikes, timeout, domains_text, bypass_text, ignore_text):
+        super().__init__(title="Автомодерация")
         self.cog = cog
         self.enabled = discord.ui.TextInput(label="Включена (да/нет)", default="да" if enabled else "нет", max_length=3)
         self.strikes = discord.ui.TextInput(label="Нарушений до тайм-аута (1-10)", default=str(strikes), max_length=2)
         self.timeout = discord.ui.TextInput(label="Тайм-аут, мин (0-1440)", default=str(timeout), max_length=4)
         self.domains = discord.ui.TextInput(
-            label="Разрешённые домены (по одному в строке)",
-            style=discord.TextStyle.paragraph,
-            default=domains_text,
-            required=False,
-            max_length=2000,
+            label="Домены (по одному в строке)", style=discord.TextStyle.paragraph,
+            default=domains_text, required=False, max_length=2000,
         )
-        for item in (self.enabled, self.strikes, self.timeout, self.domains):
+        self.bypass = discord.ui.TextInput(label="Роли без проверки (ID через запятую)", default=bypass_text,
+                                           required=False, max_length=1000)
+        self.ignore = discord.ui.TextInput(label="Каналы без проверки (ID через запятую)", default=ignore_text,
+                                           required=False, max_length=1000)
+        for item in (self.enabled, self.strikes, self.timeout, self.domains, self.bypass, self.ignore):
             self.add_item(item)
 
     async def on_submit(self, interaction):
+        gid = interaction.guild.id
         enabled = str(self.enabled).strip().lower() in ("да", "yes", "1", "true", "вкл")
-        strikes = clamp(str(self.strikes), 1, 10, 3)
-        timeout = clamp(str(self.timeout), 0, 1440, 10)
+        await self.cog.bot.db.set_setting(gid, "automod_enabled", "1" if enabled else "0")
+        await self.cog.bot.db.set_setting(gid, "automod_strikes", clamp(str(self.strikes), 1, 10, 3))
+        await self.cog.bot.db.set_setting(gid, "automod_timeout", clamp(str(self.timeout), 0, 1440, 10))
         domains = [d.strip().lower() for d in str(self.domains).splitlines() if d.strip()][:200]
-        await self.cog.save_automod(interaction, enabled, strikes, timeout, domains)
-
-
-class AutomodSelect(discord.ui.Select):
-    def __init__(self, kind, items, selected, placeholder):
-        options = [
-            discord.SelectOption(label=item.name[:100], value=str(item.id), default=item.id in selected)
-            for item in items[:25]
-        ]
-        super().__init__(
-            placeholder=placeholder[:100],
-            options=options or [discord.SelectOption(label="Нет вариантов", value="0")],
-            min_values=0,
-            max_values=len(options) or 1,
-            disabled=not options,
-        )
-        self.kind = kind
-
-    async def callback(self, interaction):
-        pass
-
-
-class AutomodSectionView(BackView):
-    def __init__(self, cog, roles, channels, bypass, ignore):
-        super().__init__(cog)
-        self.add_item(AutomodSelect("automod_bypass", roles, set(bypass), "Роли без проверки"))
-        self.add_item(AutomodSelect("automod_ignore_channel", channels, set(ignore), "Каналы без проверки"))
-
-    def _selected_map(self):
-        out = {}
-        for child in self.children:
-            if isinstance(child, AutomodSelect):
-                out[child.kind] = [int(v) for v in child.values if v.isdigit()]
-        return out
-
-    @discord.ui.button(label="Параметры", emoji="🛠️", style=discord.ButtonStyle.primary, row=2)
-    async def params(self, interaction, button):
-        await self.cog.open_automod_modal(interaction)
-
-    @discord.ui.button(label="Сохранить списки", emoji="💾", style=discord.ButtonStyle.success, row=3)
-    async def save(self, interaction, button):
-        await self.cog.save_automod_lists(interaction, self._selected_map())
-
-
-class ChannelSelect(discord.ui.Select):
-    def __init__(self, kind, items, selected, placeholder, max_values=1):
-        options = [
-            discord.SelectOption(
-                label=item.name[:100],
-                value=str(item.id),
-                default=(item.id == selected) if max_values == 1 else (item.id in selected),
-            )
-            for item in items[:25]
-        ]
-        super().__init__(
-            placeholder=placeholder[:100],
-            options=options or [discord.SelectOption(label="Нет вариантов", value="0")],
-            min_values=0,
-            max_values=max(1, min(max_values, len(options))) if options else 1,
-            disabled=not options,
-        )
-        self.kind = kind
-
-    async def callback(self, interaction):
-        pass
+        await self.cog.bot.db.set_domains(gid, domains)
+        await self.cog.bot.db.set_targets(gid, "automod_bypass", parse_ids(str(self.bypass)))
+        await self.cog.bot.db.set_targets(gid, "automod_ignore_channel", parse_ids(str(self.ignore)))
+        await reply(interaction, embeds.ok("Автомодерация сохранена."))
 
 
 class TicketsModal(discord.ui.Modal):
-    def __init__(self, cog, max_open, types_text):
-        super().__init__(title="Тикеты: лимит и типы")
+    def __init__(self, cog, category, log_channel, max_open, support, types_text):
+        super().__init__(title="Тикеты")
         self.cog = cog
+        self.category = discord.ui.TextInput(label="ID категории тикетов", default=category, required=False,
+                                             max_length=30)
+        self.log_channel = discord.ui.TextInput(label="ID лог-канала тикетов", default=log_channel, required=False,
+                                                max_length=30)
         self.max_open = discord.ui.TextInput(label="Тикетов на человека (1-5)", default=str(max_open), max_length=1)
+        self.support = discord.ui.TextInput(label="Роли поддержки (ID через запятую)", default=support,
+                                            required=False, max_length=1000)
         self.types = discord.ui.TextInput(
-            label="Типы: эмодзи | Название | Описание",
-            style=discord.TextStyle.paragraph,
-            default=types_text,
-            max_length=4000,
+            label="Типы: эмодзи | Название | Описание", style=discord.TextStyle.paragraph,
+            default=types_text, max_length=4000,
         )
-        self.add_item(self.max_open)
-        self.add_item(self.types)
+        for item in (self.category, self.log_channel, self.max_open, self.support, self.types):
+            self.add_item(item)
 
     async def on_submit(self, interaction):
-        max_open = clamp(str(self.max_open), 1, 5, 1)
-        types = []
-        for line in str(self.types).splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) >= 2:
-                emoji, label = parts[0], parts[1]
-                desc = " | ".join(parts[2:]) if len(parts) > 2 else ""
-            else:
-                emoji, label, desc = "", parts[0], ""
-            if not label:
-                continue
-            types.append({
-                "key": f"t{len(types)}",
-                "slug": "ticket",
-                "label": label[:100],
-                "emoji": emoji[:8],
-                "description": desc[:100],
-            })
-            if len(types) >= 25:
-                break
+        gid = interaction.guild.id
+        db = self.cog.bot.db
+        category = parse_ids(str(self.category))
+        log_channel = parse_ids(str(self.log_channel))
+        if category:
+            await db.set_setting(gid, "ticket_category", category[0])
+        else:
+            await db.del_setting(gid, "ticket_category")
+        if log_channel:
+            await db.set_setting(gid, "ticket_log", log_channel[0])
+        else:
+            await db.del_setting(gid, "ticket_log")
+        await db.set_setting(gid, "ticket_max_open", clamp(str(self.max_open), 1, 5, 1))
+        await db.set_targets(gid, "ticket_support", parse_ids(str(self.support)))
+        types = parse_types(str(self.types))
         if not types:
-            await interaction.response.send_message(embed=embeds.err("Нужен хотя бы один тип обращения."), ephemeral=True)
+            await reply(interaction, embeds.err("Нужен хотя бы один тип обращения."))
             return
-        await self.cog.save_tickets_modal(interaction, max_open, types)
+        await db.set_setting(gid, "ticket_types", json.dumps(types, ensure_ascii=False))
+        await reply(interaction, embeds.ok("Тикеты сохранены."))
 
 
-class TicketsSectionView(BackView):
-    def __init__(self, cog, categories, channels, roles, category_sel, log_sel, support_sel):
-        super().__init__(cog)
-        self.add_item(ChannelSelect("ticket_category", categories, category_sel, "Категория для тикетов", 1))
-        self.add_item(ChannelSelect("ticket_log", channels, log_sel, "Лог-канал тикетов", 1))
-        self.add_item(AutomodSelect("ticket_support", roles, set(support_sel), "Роли поддержки"))
+class GeneralModal(discord.ui.Modal):
+    def __init__(self, cog, mod_log, welcome_channel, welcome_text):
+        super().__init__(title="Общие настройки")
+        self.cog = cog
+        self.mod_log = discord.ui.TextInput(label="ID лог-канала модерации", default=mod_log, required=False,
+                                            max_length=30)
+        self.welcome_channel = discord.ui.TextInput(label="ID канала приветствий", default=welcome_channel,
+                                                    required=False, max_length=30)
+        self.welcome_text = discord.ui.TextInput(
+            label="Текст приветствия ({user}, {server})", style=discord.TextStyle.paragraph,
+            default=welcome_text, required=False, max_length=1500,
+        )
+        for item in (self.mod_log, self.welcome_channel, self.welcome_text):
+            self.add_item(item)
 
-    def _selected_map(self):
-        out = {}
-        for child in self.children:
-            if isinstance(child, (ChannelSelect, AutomodSelect)):
-                out[child.kind] = [int(v) for v in child.values if v.isdigit()]
-        return out
-
-    @discord.ui.button(label="Лимит и типы", emoji="🛠️", style=discord.ButtonStyle.primary, row=2)
-    async def modal(self, interaction, button):
-        await self.cog.open_tickets_modal(interaction)
-
-    @discord.ui.button(label="Отправить панель", emoji="📨", style=discord.ButtonStyle.primary, row=2)
-    async def send_panel(self, interaction, button):
-        await self.cog.send_ticket_panel(interaction)
-
-    @discord.ui.button(label="Сохранить", emoji="💾", style=discord.ButtonStyle.success, row=3)
-    async def save(self, interaction, button):
-        await self.cog.save_tickets(interaction, self._selected_map())
+    async def on_submit(self, interaction):
+        gid = interaction.guild.id
+        db = self.cog.bot.db
+        mod_log = parse_ids(str(self.mod_log))
+        welcome = parse_ids(str(self.welcome_channel))
+        if mod_log:
+            await db.set_setting(gid, "mod_log", mod_log[0])
+        else:
+            await db.del_setting(gid, "mod_log")
+        if welcome:
+            await db.set_setting(gid, "welcome_channel", welcome[0])
+        else:
+            await db.del_setting(gid, "welcome_channel")
+        text = str(self.welcome_text).strip()
+        if text:
+            await db.set_setting(gid, "welcome_text", text)
+        else:
+            await db.del_setting(gid, "welcome_text")
+        await reply(interaction, embeds.ok("Общие настройки сохранены."))
 
 
 class EventsSectionView(BackView):
@@ -808,46 +744,7 @@ class EventActionView(discord.ui.View):
 
     @discord.ui.button(label="Назад", emoji="⬅️", style=discord.ButtonStyle.secondary)
     async def back(self, interaction, button):
-        await self.cog.show_section(interaction, "events")
-
-
-class GeneralModal(discord.ui.Modal):
-    def __init__(self, cog, welcome_text):
-        super().__init__(title="Общие: текст приветствия")
-        self.cog = cog
-        self.welcome = discord.ui.TextInput(
-            label="Текст приветствия ({user}, {server})",
-            style=discord.TextStyle.paragraph,
-            default=welcome_text,
-            required=False,
-            max_length=1500,
-        )
-        self.add_item(self.welcome)
-
-    async def on_submit(self, interaction):
-        await self.cog.save_welcome_text(interaction, str(self.welcome).strip())
-
-
-class GeneralSectionView(BackView):
-    def __init__(self, cog, channels, mod_log_sel, welcome_sel):
-        super().__init__(cog)
-        self.add_item(ChannelSelect("mod_log", channels, mod_log_sel, "Лог-канал модерации", 1))
-        self.add_item(ChannelSelect("welcome_channel", channels, welcome_sel, "Канал приветствий", 1))
-
-    def _selected_map(self):
-        out = {}
-        for child in self.children:
-            if isinstance(child, ChannelSelect):
-                out[child.kind] = [int(v) for v in child.values if v.isdigit()]
-        return out
-
-    @discord.ui.button(label="Текст приветствия", emoji="✏️", style=discord.ButtonStyle.primary, row=2)
-    async def modal(self, interaction, button):
-        await self.cog.open_general_modal(interaction)
-
-    @discord.ui.button(label="Сохранить", emoji="💾", style=discord.ButtonStyle.success, row=3)
-    async def save(self, interaction, button):
-        await self.cog.save_general(interaction, self._selected_map())
+        await self.cog.open_events(interaction)
 
 
 class Panel(commands.Cog):
@@ -865,161 +762,59 @@ class Panel(commands.Cog):
         await self.show_main(interaction, initial=True)
 
     async def show_main(self, interaction, initial=False):
-        embed = embeds.make(
-            "🟣 VEX — панель управления",
-            "Всё управление ботом в одном месте. Выбери раздел:",
-        )
+        embed = embeds.make("🟣 VEX — панель управления", "Всё управление ботом в одном месте.")
         embed.add_field(
             name="Разделы",
-            value="🔐 Доступ • 🎭 Роли • 🛡️ Автомод • 🎫 Тикеты\n📝 События • ⚙️ Общие • ❓ Помощь",
+            value="🔐 Доступ • 🎭 Роли • 🛡️ Автомод\n🎫 Тикеты • 📝 События • ⚙️ Общие",
+            inline=False,
+        )
+        embed.add_field(
+            name="Как настраивать",
+            value="Нажми раздел — откроется форма. Роли и каналы указываются **ID** (ПКМ по роли/каналу → «Копировать ID»).",
             inline=False,
         )
         view = MainView(self)
-        if initial:
-            await interaction.edit_original_response(embed=embed, view=view)
-        elif interaction.response.is_done():
+        if initial or interaction.response.is_done():
             await interaction.edit_original_response(embed=embed, view=view)
         else:
             await interaction.response.edit_message(embed=embed, view=view)
 
-    async def show_section(self, interaction, key):
-        guild = interaction.guild
-        if key == "access":
-            selected = {k: await self.bot.db.get_targets(guild.id, f"cmd:{k}") for k in config.COMMAND_KEYS}
-            view = AccessSectionView(self, [r for r in guild.roles if not r.is_default()], selected)
-            embed = embeds.make("🔐 Доступ к командам", "Кто из ролей может пользоваться какими командами. Администраторы всегда имеют доступ.")
-        elif key == "roles":
-            member_sel = await self.bot.db.get_targets(guild.id, "autorole_member")
-            bot_sel = await self.bot.db.get_targets(guild.id, "autorole_bot")
-            manageable_sel = await self.bot.db.get_targets(guild.id, "manageable")
-            view = RolesSectionView(self, [r for r in guild.roles if not r.is_default()], member_sel, bot_sel, manageable_sel)
-            embed = embeds.make("🎭 Роли", "Авто-выдача и список ролей, которые можно выдавать.")
-        elif key == "automod":
-            bypass = await self.bot.db.get_targets(guild.id, "automod_bypass")
-            ignore = await self.bot.db.get_targets(guild.id, "automod_ignore_channel")
-            view = AutomodSectionView(self, [r for r in guild.roles if not r.is_default()], list(guild.text_channels), bypass, ignore)
-            embed = embeds.make("🛡️ Автомодерация", "Настройки фильтра ссылок и списки исключений.")
-        elif key == "tickets":
-            cats = [c for c in guild.categories]
-            channels = list(guild.text_channels)
-            roles = [r for r in guild.roles if not r.is_default()]
-            cat_sel = pick_one(await self.bot.db.get_setting(guild.id, "ticket_category"), {c.id for c in cats})
-            log_sel = pick_one(await self.bot.db.get_setting(guild.id, "ticket_log"), {c.id for c in channels})
-            support_sel = await self.bot.db.get_targets(guild.id, "ticket_support")
-            view = TicketsSectionView(self, cats, channels, roles, cat_sel, log_sel, support_sel)
-            embed = embeds.make("🎫 Тикеты", "Настройки тикетов и отправка панели.")
-        elif key == "events":
-            rows = await self.bot.db.fetchall(
-                "SELECT * FROM wipe_events WHERE guild_id=? ORDER BY ts DESC LIMIT 12", (guild.id,)
-            )
-            events = [{"message_id": r["message_id"], "title": r["title"], "ts": r["ts"], "closed": r["closed"]} for r in rows]
-            view = EventsSectionView(self, events)
-            embed = embeds.make("📝 События", "Нажми на событие для управления (закрыть/напомнить/удалить).")
-        elif key == "general":
-            channels = list(guild.text_channels)
-            mod_log_sel = pick_one(await self.bot.db.get_setting(guild.id, "mod_log"), {c.id for c in channels})
-            welcome_sel = pick_one(await self.bot.db.get_setting(guild.id, "welcome_channel"), {c.id for c in channels})
-            view = GeneralSectionView(self, channels, mod_log_sel, welcome_sel)
-            embed = embeds.make("⚙️ Общие", "Логи модерации и приветствия.")
-        elif key == "help":
-            embed = embeds.make("❓ Помощь", "Панель дублирует слэш-команды. Команды остаются доступными.")
-            embed.add_field(name="Тикеты", value="`/ticket ...`", inline=True)
-            embed.add_field(name="События", value="`/wipereact`, `/noreact`", inline=True)
-            embed.add_field(name="Роли", value="`/role`, `/autorole`", inline=True)
-            embed.add_field(name="Автомод", value="`/automod ...`", inline=True)
-            embed.add_field(name="Прочее", value="`/say`, `/perms`, `/config`", inline=True)
-            view = BackView(self)
-        else:
-            await self.show_main(interaction)
-            return
+    async def open_access(self, interaction):
+        selected = {k: await self.bot.db.get_targets(interaction.guild.id, f"cmd:{k}") for k in config.COMMAND_KEYS}
+        lines = []
+        for key, desc in config.COMMAND_KEYS.items():
+            lines.append(f"# {desc}")
+            lines.append(f"{key} = {ids_line(selected.get(key, []))}")
+        await interaction.response.send_modal(AccessModal(self, "\n".join(lines)))
 
-        if interaction.response.is_done():
-            await interaction.edit_original_response(embed=embed, view=view)
-        else:
-            await interaction.response.edit_message(embed=embed, view=view)
-
-    async def save_access(self, interaction, selected):
-        guild = interaction.guild
-        for key, ids in selected.items():
-            await self.bot.db.set_targets(guild.id, f"cmd:{key}", ids)
-        await interaction.response.send_message(embed=embeds.ok("Доступ обновлён."), ephemeral=True)
-
-    async def save_roles(self, interaction, selected):
-        guild = interaction.guild
-        for kind, ids in selected.items():
-            await self.bot.db.set_targets(guild.id, kind, ids)
-        await interaction.response.send_message(embed=embeds.ok("Роли обновлены."), ephemeral=True)
-
-    async def save_automod_lists(self, interaction, selected):
-        guild = interaction.guild
-        for kind, ids in selected.items():
-            await self.bot.db.set_targets(guild.id, kind, ids)
-        await interaction.response.send_message(embed=embeds.ok("Списки исключений обновлены."), ephemeral=True)
-
-    async def save_automod(self, interaction, enabled, strikes, timeout, domains):
+    async def open_roles(self, interaction):
         gid = interaction.guild.id
-        await self.bot.db.set_setting(gid, "automod_enabled", "1" if enabled else "0")
-        await self.bot.db.set_setting(gid, "automod_strikes", strikes)
-        await self.bot.db.set_setting(gid, "automod_timeout", timeout)
-        await self.bot.db.set_domains(gid, domains)
-        await interaction.response.send_message(embed=embeds.ok("Параметры автомодерации сохранены."), ephemeral=True)
+        member = await self.bot.db.get_targets(gid, "autorole_member")
+        bot_roles = await self.bot.db.get_targets(gid, "autorole_bot")
+        manageable = await self.bot.db.get_targets(gid, "manageable")
+        await interaction.response.send_modal(
+            RolesModal(self, ids_line(member), ids_line(bot_roles), ids_line(manageable))
+        )
 
-    async def save_tickets(self, interaction, selected):
-        gid = interaction.guild.id
-        cat = selected.get("ticket_category", [])
-        log = selected.get("ticket_log", [])
-        support = selected.get("ticket_support", [])
-        if cat:
-            await self.bot.db.set_setting(gid, "ticket_category", cat[0])
-        else:
-            await self.bot.db.del_setting(gid, "ticket_category")
-        if log:
-            await self.bot.db.set_setting(gid, "ticket_log", log[0])
-        else:
-            await self.bot.db.del_setting(gid, "ticket_log")
-        await self.bot.db.set_targets(gid, "ticket_support", support)
-        await interaction.response.send_message(embed=embeds.ok("Настройки тикетов сохранены."), ephemeral=True)
-
-    async def save_tickets_modal(self, interaction, max_open, types):
-        gid = interaction.guild.id
-        await self.bot.db.set_setting(gid, "ticket_max_open", max_open)
-        await self.bot.db.set_setting(gid, "ticket_types", json.dumps(types, ensure_ascii=False))
-        await interaction.response.send_message(embed=embeds.ok("Лимит и типы тикетов сохранены."), ephemeral=True)
-
-    async def save_welcome_text(self, interaction, text):
-        gid = interaction.guild.id
-        if text:
-            await self.bot.db.set_setting(gid, "welcome_text", text)
-        else:
-            await self.bot.db.del_setting(gid, "welcome_text")
-        await interaction.response.send_message(embed=embeds.ok("Текст приветствия сохранён."), ephemeral=True)
-
-    async def save_general(self, interaction, selected):
-        gid = interaction.guild.id
-        mod_log = selected.get("mod_log", [])
-        welcome = selected.get("welcome_channel", [])
-        if mod_log:
-            await self.bot.db.set_setting(gid, "mod_log", mod_log[0])
-        else:
-            await self.bot.db.del_setting(gid, "mod_log")
-        if welcome:
-            await self.bot.db.set_setting(gid, "welcome_channel", welcome[0])
-        else:
-            await self.bot.db.del_setting(gid, "welcome_channel")
-        await interaction.response.send_message(embed=embeds.ok("Общие настройки сохранены."), ephemeral=True)
-
-    async def open_automod_modal(self, interaction):
+    async def open_automod(self, interaction):
         gid = interaction.guild.id
         enabled = await self.bot.db.get_setting(gid, "automod_enabled", "1") != "0"
         strikes = clamp(await self.bot.db.get_setting(gid, "automod_strikes", "3"), 1, 10, 3)
         timeout = clamp(await self.bot.db.get_setting(gid, "automod_timeout", "10"), 0, 1440, 10)
         rows = await self.bot.db.fetchall("SELECT domain FROM allowed_domains WHERE guild_id=?", (gid,))
-        domains_text = "\n".join(r["domain"] for r in rows)
-        await interaction.response.send_modal(AutomodModal(self, enabled, strikes, timeout, domains_text))
+        domains = "\n".join(r["domain"] for r in rows)
+        bypass = ids_line(await self.bot.db.get_targets(gid, "automod_bypass"))
+        ignore = ids_line(await self.bot.db.get_targets(gid, "automod_ignore_channel"))
+        await interaction.response.send_modal(
+            AutomodModal(self, enabled, strikes, timeout, domains, bypass, ignore)
+        )
 
-    async def open_tickets_modal(self, interaction):
+    async def open_tickets(self, interaction):
         gid = interaction.guild.id
+        category = await self.bot.db.get_setting(gid, "ticket_category", "")
+        log_channel = await self.bot.db.get_setting(gid, "ticket_log", "")
         max_open = clamp(await self.bot.db.get_setting(gid, "ticket_max_open", "1"), 1, 5, 1)
+        support = ids_line(await self.bot.db.get_targets(gid, "ticket_support"))
         raw = await self.bot.db.get_setting(gid, "ticket_types")
         if raw:
             try:
@@ -1033,28 +828,30 @@ class Panel(commands.Cog):
             types_text = "\n".join(
                 f"{t['emoji']} | {t['label']} | {t['description']}" for t in config.TICKET_TYPES
             )
-        await interaction.response.send_modal(TicketsModal(self, max_open, types_text))
+        await interaction.response.send_modal(
+            TicketsModal(self, str(category), str(log_channel), max_open, support, types_text)
+        )
 
-    async def open_general_modal(self, interaction):
-        text = await self.bot.db.get_setting(interaction.guild.id, "welcome_text", "")
-        await interaction.response.send_modal(GeneralModal(self, text or "Привет, {user}! Добро пожаловать на **{server}**."))
+    async def open_events(self, interaction):
+        rows = await self.bot.db.fetchall(
+            "SELECT * FROM wipe_events WHERE guild_id=? ORDER BY ts DESC LIMIT 12", (interaction.guild.id,)
+        )
+        events = [{"message_id": r["message_id"], "title": r["title"], "ts": r["ts"], "closed": r["closed"]} for r in rows]
+        embed = embeds.make("📝 События", "Нажми на событие для управления.")
+        view = EventsSectionView(self, events)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=view)
+        else:
+            await interaction.response.edit_message(embed=embed, view=view)
 
-    async def send_ticket_panel(self, interaction):
-        await interaction.response.defer(ephemeral=True)
-        channel = interaction.channel
-        if not isinstance(channel, discord.TextChannel):
-            await interaction.followup.send(embed=embeds.err("Только в текстовый канал."), ephemeral=True)
-            return
-        cog = self.bot.get_cog("Tickets")
-        if cog is None:
-            await interaction.followup.send(embed=embeds.err("Модуль тикетов не загружен."), ephemeral=True)
-            return
-        try:
-            await channel.send(embed=cog.panel_embed(), view=cog.TicketPanelView())
-        except discord.Forbidden:
-            await interaction.followup.send(embed=embeds.err("Нет прав писать в этот канал."), ephemeral=True)
-            return
-        await interaction.followup.send(embed=embeds.ok(f"Панель отправлена в {channel.mention}."), ephemeral=True)
+    async def open_general(self, interaction):
+        gid = interaction.guild.id
+        mod_log = await self.bot.db.get_setting(gid, "mod_log", "")
+        welcome_channel = await self.bot.db.get_setting(gid, "welcome_channel", "")
+        welcome_text = await self.bot.db.get_setting(gid, "welcome_text", "")
+        await interaction.response.send_modal(
+            GeneralModal(self, str(mod_log), str(welcome_channel), welcome_text)
+        )
 
     async def open_event(self, interaction, event):
         await interaction.response.send_message(
@@ -1081,31 +878,29 @@ class Panel(commands.Cog):
     async def toggle_event(self, interaction, event):
         row = await self.bot.db.fetchone("SELECT closed FROM wipe_events WHERE message_id=?", (event["message_id"],))
         if not row:
-            await interaction.response.send_message(embed=embeds.err("Событие не найдено."), ephemeral=True)
+            await reply(interaction, embeds.err("Событие не найдено."))
             return
         new_state = 0 if row["closed"] else 1
         await self.bot.db.execute("UPDATE wipe_events SET closed=? WHERE message_id=?", (new_state, event["message_id"]))
         event["closed"] = new_state
-        await interaction.response.send_message(
-            embed=embeds.ok("Приём закрыт." if new_state else "Приём открыт."), ephemeral=True
-        )
+        await reply(interaction, embeds.ok("Приём закрыт." if new_state else "Приём открыт."))
 
     async def remind_event(self, interaction, event):
         message = await self._event_message(event)
         if message is None:
-            await interaction.response.send_message(embed=embeds.err("Сообщение события не найдено."), ephemeral=True)
+            await reply(interaction, embeds.err("Сообщение события не найдено."))
             return
         responded = {r["user_id"] for r in await self.bot.db.fetchall(
             "SELECT user_id FROM wipe_responses WHERE message_id=?", (event["message_id"],))}
         members = [m for m in message.channel.members if not m.bot and m.id not in responded]
         if not members:
-            await interaction.response.send_message(embed=embeds.ok("Все уже ответили."), ephemeral=True)
+            await reply(interaction, embeds.ok("Все уже ответили."))
             return
         await message.reply(
             "🔔 Отметьтесь, пожалуйста, под событием!\n" + " ".join(m.mention for m in members)[:1800],
             allowed_mentions=discord.AllowedMentions(users=True),
         )
-        await interaction.response.send_message(embed=embeds.ok(f"Напомнил {len(members)} участникам."), ephemeral=True)
+        await reply(interaction, embeds.ok(f"Напомнил {len(members)} участникам."))
 
     async def delete_event(self, interaction, event):
         message = await self._event_message(event)
@@ -1116,13 +911,13 @@ class Panel(commands.Cog):
                 await message.delete()
             except discord.HTTPException:
                 pass
-        await interaction.response.send_message(embed=embeds.ok("Событие удалено."), ephemeral=True)
+        await reply(interaction, embeds.ok("Событие удалено."))
 
 
 async def setup(bot):
     await bot.add_cog(Panel(bot))
 ''',
-    'vex.cogs.tickets': r'''"""Тикеты: панель с меню, приватные каналы, управление, транскрипты (как в Ticket Tool)."""
+    'vex.cogs.tickets': r'''"""Тикеты: панель с меню, приватные каналы, управление, транскрипты."""
 import asyncio
 import io
 from time import time as now_ts
@@ -1286,11 +1081,7 @@ class Tickets(commands.Cog):
         return await member_has_access(self.bot, member, "ticket_manage")
 
     async def build_transcript(self, channel, row):
-        lines = [
-            f"Тикет #{row['id']:04d} • {channel.guild.name}",
-            f"Автор: {row['user_id']}",
-            "-" * 48,
-        ]
+        lines = [f"Тикет #{row['id']:04d} • {channel.guild.name}", f"Автор: {row['user_id']}", "-" * 48]
         async for message in channel.history(limit=None, oldest_first=True):
             stamp = message.created_at.astimezone(TZ).strftime("%d.%m.%Y %H:%M")
             text = message.content or ""
@@ -1307,15 +1098,12 @@ class Tickets(commands.Cog):
         user = interaction.user
         db = self.bot.db
         await interaction.response.defer(ephemeral=True)
-
         category_id = await db.get_setting(guild.id, "ticket_category")
         category = guild.get_channel(int(category_id)) if category_id else None
         if not isinstance(category, discord.CategoryChannel):
-            await interaction.followup.send(
-                embed=embeds.err("Тикеты ещё не настроены. Сообщи администрации."), ephemeral=True
-            )
+            await interaction.followup.send(embed=embeds.err("Тикеты ещё не настроены. Сообщи администрации."),
+                                            ephemeral=True)
             return
-
         max_open = int(await db.get_setting(guild.id, "ticket_max_open", "1"))
         rows = await db.fetchall(
             "SELECT id, channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'",
@@ -1326,142 +1114,103 @@ class Tickets(commands.Cog):
             if guild.get_channel(row["channel_id"]):
                 live.append(row)
             else:
-                await db.execute(
-                    "UPDATE tickets SET status='closed', closed_at=? WHERE id=?", (int(now_ts()), row["id"])
-                )
+                await db.execute("UPDATE tickets SET status='closed', closed_at=? WHERE id=?",
+                                 (int(now_ts()), row["id"]))
         if len(live) >= max_open:
             await interaction.followup.send(
-                embed=embeds.warn(f"У тебя уже есть открытый тикет: <#{live[0]['channel_id']}>"),
-                ephemeral=True,
+                embed=embeds.warn(f"У тебя уже есть открытый тикет: <#{live[0]['channel_id']}>"), ephemeral=True
             )
             return
-
         support_ids = await db.get_targets(guild.id, "ticket_support")
         support_roles = [r for r in (guild.get_role(i) for i in support_ids) if r]
-
         ticket_id = await db.insert(
             "INSERT INTO tickets(guild_id, user_id, type, reason, created_at) VALUES(?,?,?,?,?)",
             (guild.id, user.id, type_key, reason, int(now_ts())),
         )
-
-        member_perms = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True,
-            attach_files=True, embed_links=True,
-        )
-        staff_perms = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True,
-            attach_files=True, embed_links=True, manage_messages=True,
-        )
+        member_perms = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True,
+                                                   attach_files=True, embed_links=True)
+        staff_perms = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True,
+                                                  attach_files=True, embed_links=True, manage_messages=True)
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: member_perms,
-            guild.me: discord.PermissionOverwrite(
-                view_channel=True, send_messages=True, manage_channels=True, manage_messages=True,
-                embed_links=True, attach_files=True, read_message_history=True,
-            ),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True,
+                                                  manage_messages=True, embed_links=True, attach_files=True,
+                                                  read_message_history=True),
         }
         for role in support_roles:
             overwrites[role] = staff_perms
-
         slug = TYPE_MAP[type_key]["slug"]
         try:
             channel = await guild.create_text_channel(
-                name=f"{slug}-{ticket_id:04d}",
-                category=category,
-                overwrites=overwrites,
-                topic=f"Тикет #{ticket_id:04d} • {user} ({user.id})",
-                reason=f"Тикет от {user}",
+                name=f"{slug}-{ticket_id:04d}", category=category, overwrites=overwrites,
+                topic=f"Тикет #{ticket_id:04d} • {user} ({user.id})", reason=f"Тикет от {user}",
             )
         except (discord.Forbidden, discord.HTTPException):
             await db.execute("DELETE FROM tickets WHERE id=?", (ticket_id,))
-            await interaction.followup.send(
-                embed=embeds.err("Не удалось создать канал. Проверь права бота (Manage Channels)."),
-                ephemeral=True,
-            )
+            await interaction.followup.send(embed=embeds.err("Не удалось создать канал. Проверь права бота (Manage Channels)."),
+                                            ephemeral=True)
             return
-
         await db.execute("UPDATE tickets SET channel_id=? WHERE id=?", (channel.id, ticket_id))
         row = await db.fetchone("SELECT * FROM tickets WHERE id=?", (ticket_id,))
-
         pings = " ".join([user.mention] + [r.mention for r in support_roles])
-        await channel.send(
-            content=pings,
-            embed=ticket_embed(guild, row),
-            view=TicketControlView(),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=True),
-        )
-        await interaction.followup.send(
-            embed=embeds.ok(f"Тикет создан: {channel.mention}", "Обращение открыто"), ephemeral=True
-        )
+        await channel.send(content=pings, embed=ticket_embed(guild, row), view=TicketControlView(),
+                           allowed_mentions=discord.AllowedMentions(users=True, roles=True))
+        await interaction.followup.send(embed=embeds.ok(f"Тикет создан: {channel.mention}", "Обращение открыто"),
+                                        ephemeral=True)
 
     async def on_close_button(self, interaction):
         row = await self.get_ticket(interaction.channel.id)
         if row is None:
-            await interaction.response.send_message(
-                embed=embeds.err("Этот канал не является открытым тикетом."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Этот канал не является открытым тикетом."),
+                                                    ephemeral=True)
             return
         if not (interaction.user.id == row["user_id"] or await self.is_staff(interaction.user)):
-            await interaction.response.send_message(
-                embed=embeds.err("Закрыть тикет может его автор или поддержка."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Закрыть тикет может его автор или поддержка."),
+                                                    ephemeral=True)
             return
         await interaction.response.send_message(
             embed=embeds.warn("Закрыть этот тикет? Переписка сохранится файлом в лог-канале."),
-            view=ConfirmCloseView(self, interaction.channel),
-            ephemeral=True,
+            view=ConfirmCloseView(self, interaction.channel), ephemeral=True,
         )
 
     async def on_claim_button(self, interaction):
         row = await self.get_ticket(interaction.channel.id)
         if row is None:
-            await interaction.response.send_message(
-                embed=embeds.err("Этот канал не является открытым тикетом."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Этот канал не является открытым тикетом."),
+                                                    ephemeral=True)
             return
         if not await self.is_staff(interaction.user):
-            await interaction.response.send_message(
-                embed=embeds.err("Брать тикеты в работу может только поддержка."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Брать тикеты в работу может только поддержка."),
+                                                    ephemeral=True)
             return
         if row["claimed_by"]:
-            await interaction.response.send_message(
-                embed=embeds.warn(f"Тикет уже ведёт <@{row['claimed_by']}>."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.warn(f"Тикет уже ведёт <@{row['claimed_by']}>."),
+                                                    ephemeral=True)
             return
-        await self.bot.db.execute(
-            "UPDATE tickets SET claimed_by=? WHERE id=?", (interaction.user.id, row["id"])
-        )
+        await self.bot.db.execute("UPDATE tickets SET claimed_by=? WHERE id=?", (interaction.user.id, row["id"]))
         row = await self.bot.db.fetchone("SELECT * FROM tickets WHERE id=?", (row["id"],))
-        await interaction.response.edit_message(
-            embed=ticket_embed(interaction.guild, row), view=TicketControlView()
-        )
-        await interaction.channel.send(
-            embed=embeds.info(f"✋ {interaction.user.mention} взял(а) тикет в работу."),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        await interaction.response.edit_message(embed=ticket_embed(interaction.guild, row), view=TicketControlView())
+        await interaction.channel.send(embed=embeds.info(f"✋ {interaction.user.mention} взял(а) тикет в работу."),
+                                       allowed_mentions=discord.AllowedMentions.none())
 
     async def close_ticket(self, channel, closer):
         row = await self.get_ticket(channel.id)
         if row is None:
             return
         guild = channel.guild
-        await self.bot.db.execute(
-            "UPDATE tickets SET status='closed', closed_at=? WHERE id=?", (int(now_ts()), row["id"])
-        )
+        await self.bot.db.execute("UPDATE tickets SET status='closed', closed_at=? WHERE id=?",
+                                  (int(now_ts()), row["id"]))
         data = await self.build_transcript(channel, row)
         filename = f"ticket-{row['id']:04d}.txt"
-
         log = embeds.make(f"🔒 Тикет #{row['id']:04d} закрыт")
         log.add_field(name="Автор", value=f"<@{row['user_id']}>", inline=True)
         log.add_field(name="Закрыл", value=closer.mention, inline=True)
         if row["claimed_by"]:
             log.add_field(name="Вёл", value=f"<@{row['claimed_by']}>", inline=True)
         log.add_field(name="Открыт", value=f"<t:{row['created_at']}:f>", inline=True)
-        await self.bot.send_log(
-            guild, log, key="ticket_log", file=discord.File(io.BytesIO(data), filename=filename)
-        )
-
+        await self.bot.send_log(guild, log, key="ticket_log",
+                                file=discord.File(io.BytesIO(data), filename=filename))
         author = guild.get_member(row["user_id"])
         if author:
             try:
@@ -1469,7 +1218,6 @@ class Tickets(commands.Cog):
                 await author.send(embed=dm, file=discord.File(io.BytesIO(data), filename=filename))
             except discord.HTTPException:
                 pass
-
         try:
             await channel.send(embed=embeds.warn("Тикет закрыт. Канал будет удалён через 5 секунд."))
         except discord.HTTPException:
@@ -1491,17 +1239,15 @@ class Tickets(commands.Cog):
                     title: str | None = None, description: str | None = None):
         channel = channel or interaction.channel
         if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(
-                embed=embeds.err("Панель можно отправить только в текстовый канал."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Панель можно отправить только в текстовый канал."),
+                                                    ephemeral=True)
             return
         text = description.replace("\\n", "\n") if description else None
         try:
             await channel.send(embed=panel_embed(title, text), view=TicketPanelView())
         except discord.Forbidden:
-            await interaction.response.send_message(
-                embed=embeds.err(f"У меня нет прав писать в {channel.mention}."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err(f"У меня нет прав писать в {channel.mention}."),
+                                                    ephemeral=True)
             return
         note = f"Панель отправлена в {channel.mention}."
         if not await self.bot.db.get_setting(interaction.guild.id, "ticket_category"):
@@ -1525,8 +1271,7 @@ class Tickets(commands.Cog):
         if log_channel:
             await self.bot.db.set_setting(gid, "ticket_log", log_channel.id)
             lines.append(f"Лог тикетов: {log_channel.mention}")
-        await interaction.response.send_message(embed=embeds.ok("\n".join(lines), "Тикеты настроены"),
-                                                ephemeral=True)
+        await interaction.response.send_message(embed=embeds.ok("\n".join(lines), "Тикеты настроены"), ephemeral=True)
 
     @ticket.command(name="support_add", description="Добавить роль поддержки (видит и ведёт все тикеты)")
     @app_commands.describe(role="Роль модераторов/поддержки")
@@ -1554,14 +1299,11 @@ class Tickets(commands.Cog):
     async def _staff_ticket(self, interaction):
         row = await self.get_ticket(interaction.channel.id)
         if row is None:
-            await interaction.response.send_message(
-                embed=embeds.err("Эту команду нужно вызывать внутри открытого тикета."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Эту команду нужно вызывать внутри открытого тикета."),
+                                                    ephemeral=True)
             return None
         if not await self.is_staff(interaction.user):
-            await interaction.response.send_message(
-                embed=embeds.err("Команда доступна только поддержке."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Команда доступна только поддержке."), ephemeral=True)
             return None
         return row
 
@@ -1570,9 +1312,8 @@ class Tickets(commands.Cog):
     async def add(self, interaction: discord.Interaction, user: discord.Member):
         if await self._staff_ticket(interaction) is None:
             return
-        await interaction.channel.set_permissions(
-            user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True
-        )
+        await interaction.channel.set_permissions(user, view_channel=True, send_messages=True,
+                                                   read_message_history=True, attach_files=True)
         await interaction.response.send_message(embed=embeds.ok(f"{user.mention} добавлен(а) в тикет."))
 
     @ticket.command(name="remove", description="Убрать участника из этого тикета")
@@ -1582,9 +1323,8 @@ class Tickets(commands.Cog):
         if row is None:
             return
         if user.id == row["user_id"]:
-            await interaction.response.send_message(
-                embed=embeds.err("Автора тикета убрать нельзя — закрой тикет."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Автора тикета убрать нельзя — закрой тикет."),
+                                                    ephemeral=True)
             return
         await interaction.channel.set_permissions(user, overwrite=None)
         await interaction.response.send_message(embed=embeds.ok(f"{user.mention} убран(а) из тикета."))
@@ -1601,14 +1341,12 @@ class Tickets(commands.Cog):
     async def close(self, interaction: discord.Interaction):
         row = await self.get_ticket(interaction.channel.id)
         if row is None:
-            await interaction.response.send_message(
-                embed=embeds.err("Эту команду нужно вызывать внутри открытого тикета."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Эту команду нужно вызывать внутри открытого тикета."),
+                                                    ephemeral=True)
             return
         if not (interaction.user.id == row["user_id"] or await self.is_staff(interaction.user)):
-            await interaction.response.send_message(
-                embed=embeds.err("Закрыть тикет может его автор или поддержка."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Закрыть тикет может его автор или поддержка."),
+                                                    ephemeral=True)
             return
         await interaction.response.send_message(embed=embeds.warn("Закрываю тикет…"), ephemeral=True)
         await self.close_ticket(interaction.channel, interaction.user)
@@ -1632,11 +1370,7 @@ from ..checks import access, member_has_access
 
 TZ = ZoneInfo(config.TIMEZONE)
 LINK_RE = re.compile(r"channels/(?:\d+|@me)/(\d+)/(\d+)")
-STATUSES = {
-    "accepted": ("✅", "Придут"),
-    "declined": ("❌", "Не придут"),
-    "late": ("🕒", "Опоздают"),
-}
+STATUSES = {"accepted": ("✅", "Придут"), "declined": ("❌", "Не придут"), "late": ("🕒", "Опоздают")}
 REMIND_BEFORE = 15 * 60
 
 
@@ -1684,18 +1418,11 @@ def render_list(rows, status):
 
 def build_embed(ev, rows):
     closed = bool(ev["closed"])
-    embed = embeds.make(
-        title=f"{'🔒' if closed else '📝'} {ev['title']}",
-        description=ev["description"] or None,
-        color=config.COLOR_DARK if closed else config.COLOR_MAIN,
-        footer=False,
-    )
+    embed = embeds.make(title=f"{'🔒' if closed else '📝'} {ev['title']}", description=ev["description"] or None,
+                        color=config.COLOR_DARK if closed else config.COLOR_MAIN, footer=False)
     ts = int(ev["ts"])
-    embed.add_field(
-        name="📅 Дата и время",
-        value=f"<t:{ts}:F>\n<t:{ts}:R>\n*(указано по {config.TIMEZONE})*",
-        inline=False,
-    )
+    embed.add_field(name="📅 Дата и время", value=f"<t:{ts}:F>\n<t:{ts}:R>\n*(указано по {config.TIMEZONE})*",
+                    inline=False)
     embed.add_field(name="🗺️ Сервер", value=ev["server"] or "—", inline=False)
     for status, (emoji, label) in STATUSES.items():
         count, text = render_list(rows, status)
@@ -1725,12 +1452,9 @@ class ReasonModal(discord.ui.Modal):
         self.ev_id = ev["message_id"]
         self.status = status
         self.message = message
-        self.reason = discord.ui.TextInput(
-            label="Причина" if status == "declined" else "Комментарий",
-            placeholder="Например: работа / нет интернета / буду к 20:00",
-            required=False,
-            max_length=100,
-        )
+        self.reason = discord.ui.TextInput(label="Причина" if status == "declined" else "Комментарий",
+                                           placeholder="Например: работа / нет интернета / буду к 20:00",
+                                           required=False, max_length=100)
         self.add_item(self.reason)
 
     async def on_submit(self, interaction):
@@ -1747,12 +1471,9 @@ class EditModal(discord.ui.Modal):
         self.message = message
         dt = datetime.fromtimestamp(ev["ts"], TZ)
         self.title_in = discord.ui.TextInput(label="Название", default=ev["title"], max_length=100)
-        self.desc_in = discord.ui.TextInput(
-            label="Описание", default=ev["description"] or "", style=discord.TextStyle.paragraph,
-            required=False, max_length=1000,
-        )
-        self.date_in = discord.ui.TextInput(label="Дата (ДД.ММ.ГГГГ)", default=dt.strftime("%d.%m.%Y"),
-                                            max_length=10)
+        self.desc_in = discord.ui.TextInput(label="Описание", default=ev["description"] or "",
+                                            style=discord.TextStyle.paragraph, required=False, max_length=1000)
+        self.date_in = discord.ui.TextInput(label="Дата (ДД.ММ.ГГГГ)", default=dt.strftime("%d.%m.%Y"), max_length=10)
         self.time_in = discord.ui.TextInput(label="Время (ЧЧ:ММ)", default=dt.strftime("%H:%M"), max_length=5)
         for item in (self.title_in, self.desc_in, self.date_in, self.time_in):
             self.add_item(item)
@@ -1760,9 +1481,8 @@ class EditModal(discord.ui.Modal):
     async def on_submit(self, interaction):
         dt = parse_datetime(str(self.date_in), str(self.time_in))
         if dt is None:
-            await interaction.response.send_message(
-                embed=embeds.err("Не понял дату или время. Формат: `25.11.2026` и `19:00`."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Не понял дату или время. Формат: `25.11.2026` и `19:00`."),
+                                                    ephemeral=True)
             return
         await self.cog.bot.db.execute(
             "UPDATE wipe_events SET title=?, description=?, ts=?, reminded=0 WHERE message_id=?",
@@ -1812,8 +1532,7 @@ class SettingsView(discord.ui.View):
     async def toggle(self, interaction, button):
         ev = await self.cog.get_event(self.ev_id)
         new_state = 0 if ev["closed"] else 1
-        await self.cog.bot.db.execute("UPDATE wipe_events SET closed=? WHERE message_id=?",
-                                      (new_state, self.ev_id))
+        await self.cog.bot.db.execute("UPDATE wipe_events SET closed=? WHERE message_id=?", (new_state, self.ev_id))
         await self.cog.refresh_message(self.message, self.ev_id)
         text = "Приём ответов закрыт." if new_state else "Приём ответов снова открыт."
         await interaction.response.edit_message(embed=embeds.ok(text), view=None)
@@ -1825,14 +1544,10 @@ class SettingsView(discord.ui.View):
         if not pending:
             await interaction.response.edit_message(embed=embeds.ok("Все уже ответили."), view=None)
             return
-        await interaction.response.edit_message(
-            embed=embeds.ok(f"Напоминаю {len(pending)} участникам."), view=None
-        )
+        await interaction.response.edit_message(embed=embeds.ok(f"Напоминаю {len(pending)} участникам."), view=None)
         for chunk in chunk_mentions(pending):
-            await self.message.reply(
-                f"🔔 Отметьтесь, пожалуйста, под событием!\n{chunk}",
-                allowed_mentions=discord.AllowedMentions(users=True),
-            )
+            await self.message.reply(f"🔔 Отметьтесь, пожалуйста, под событием!\n{chunk}",
+                                     allowed_mentions=discord.AllowedMentions(users=True))
 
     @discord.ui.button(label="Удалить событие", emoji="🗑️", style=discord.ButtonStyle.danger)
     async def delete(self, interaction, button):
@@ -1861,10 +1576,8 @@ class Wipe(commands.Cog):
         return await self.bot.db.fetchone("SELECT * FROM wipe_events WHERE message_id=?", (message_id,))
 
     async def get_rows(self, message_id):
-        return await self.bot.db.fetchall(
-            "SELECT user_id, status, reason FROM wipe_responses WHERE message_id=? ORDER BY rowid",
-            (message_id,),
-        )
+        return await self.bot.db.fetchall("SELECT user_id, status, reason FROM wipe_responses WHERE message_id=? ORDER BY rowid",
+                                          (message_id,))
 
     async def save_response(self, message_id, user_id, status, reason):
         await self.bot.db.execute(
@@ -1897,31 +1610,22 @@ class Wipe(commands.Cog):
     async def handle_response(self, interaction, status):
         ev = await self.get_event(interaction.message.id)
         if ev is None:
-            await interaction.response.send_message(
-                embed=embeds.err("Это событие уже не отслеживается."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Это событие уже не отслеживается."), ephemeral=True)
             return
         if ev["closed"]:
-            await interaction.response.send_message(
-                embed=embeds.warn("Приём ответов закрыт."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.warn("Приём ответов закрыт."), ephemeral=True)
             return
-
         existing = await self.bot.db.fetchone(
-            "SELECT status FROM wipe_responses WHERE message_id=? AND user_id=?",
-            (ev["message_id"], interaction.user.id),
+            "SELECT status FROM wipe_responses WHERE message_id=? AND user_id=?", (ev["message_id"], interaction.user.id)
         )
         if existing and existing["status"] == status:
-            await self.bot.db.execute(
-                "DELETE FROM wipe_responses WHERE message_id=? AND user_id=?",
-                (ev["message_id"], interaction.user.id),
-            )
+            await self.bot.db.execute("DELETE FROM wipe_responses WHERE message_id=? AND user_id=?",
+                                      (ev["message_id"], interaction.user.id))
         elif status != "accepted" and ev["ask_reason"]:
             await interaction.response.send_modal(ReasonModal(self, ev, status, interaction.message))
             return
         else:
             await self.save_response(ev["message_id"], interaction.user.id, status, None)
-
         rows = await self.get_rows(ev["message_id"])
         await interaction.response.edit_message(embed=build_embed(ev, rows), view=WipeView())
 
@@ -1931,9 +1635,8 @@ class Wipe(commands.Cog):
             await interaction.response.send_message(embed=embeds.err("Событие не найдено."), ephemeral=True)
             return
         if not await self.can_manage(interaction.user, ev):
-            await interaction.response.send_message(
-                embed=embeds.err("Редактировать может автор события или модерация."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Редактировать может автор события или модерация."),
+                                                    ephemeral=True)
             return
         await interaction.response.send_modal(EditModal(self, ev, interaction.message))
 
@@ -1943,14 +1646,12 @@ class Wipe(commands.Cog):
             await interaction.response.send_message(embed=embeds.err("Событие не найдено."), ephemeral=True)
             return
         if not await self.can_manage(interaction.user, ev):
-            await interaction.response.send_message(
-                embed=embeds.err("Настройки доступны автору события и модерации."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Настройки доступны автору события и модерации."),
+                                                    ephemeral=True)
             return
         await interaction.response.send_message(
             embed=embeds.info("Что сделать с событием?", "⚙️ Настройки события"),
-            view=SettingsView(self, ev["message_id"], interaction.message),
-            ephemeral=True,
+            view=SettingsView(self, ev["message_id"], interaction.message), ephemeral=True,
         )
 
     @tasks.loop(minutes=1)
@@ -1962,9 +1663,7 @@ class Wipe(commands.Cog):
                 (now, now + REMIND_BEFORE),
             )
             for ev in events:
-                await self.bot.db.execute(
-                    "UPDATE wipe_events SET reminded=1 WHERE message_id=?", (ev["message_id"],)
-                )
+                await self.bot.db.execute("UPDATE wipe_events SET reminded=1 WHERE message_id=?", (ev["message_id"],))
                 channel = self.bot.get_channel(ev["channel_id"])
                 if channel is None:
                     continue
@@ -1972,17 +1671,12 @@ class Wipe(commands.Cog):
                 ids = [r["user_id"] for r in rows if r["status"] in ("accepted", "late")]
                 if not ids:
                     continue
-                embed = embeds.make(
-                    f"⏰ Скоро начало: {ev['title']}",
-                    f"Старт <t:{ev['ts']}:R>. Все, кто отметился, — на связь!",
-                )
+                embed = embeds.make(f"⏰ Скоро начало: {ev['title']}",
+                                    f"Старт <t:{ev['ts']}:R>. Все, кто отметился, — на связь!")
                 mentions = " ".join(f"<@{i}>" for i in ids)[:1900]
-                await channel.send(
-                    content=mentions, embed=embed, allowed_mentions=discord.AllowedMentions(users=True)
-                )
+                await channel.send(content=mentions, embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
         except Exception:
             import logging
-
             logging.getLogger("vex").exception("Ошибка в цикле напоминаний")
 
     @reminder_loop.before_loop
@@ -1991,64 +1685,44 @@ class Wipe(commands.Cog):
 
     @app_commands.command(name="wipereact", description="Создать событие с реакциями (вайп, рейд, сбор)")
     @app_commands.describe(
-        title="Название события",
-        description="Описание (\\n — перенос строки)",
-        date="Дата: ДД.ММ.ГГГГ или ДД.ММ",
-        time="Время: ЧЧ:ММ",
-        ask_for_reason="Спрашивать причину при «Не приду» и «Опоздаю»",
-        server="Сервер Rust / IP (необязательно)",
-        ping_role="Роль, которую упомянуть в сообщении (необязательно)",
+        title="Название события", description="Описание (\\n — перенос строки)", date="Дата: ДД.ММ.ГГГГ или ДД.ММ",
+        time="Время: ЧЧ:ММ", ask_for_reason="Спрашивать причину при «Не приду» и «Опоздаю»",
+        server="Сервер Rust / IP (необязательно)", ping_role="Роль, которую упомянуть в сообщении (необязательно)",
     )
     @app_commands.guild_only()
     @access("wipe")
-    async def wipereact(self, interaction: discord.Interaction,
-                        title: app_commands.Range[str, 1, 100],
-                        description: str,
-                        date: str, time: str,
-                        ask_for_reason: bool = False,
-                        server: str | None = None,
+    async def wipereact(self, interaction: discord.Interaction, title: app_commands.Range[str, 1, 100], description: str,
+                        date: str, time: str, ask_for_reason: bool = False, server: str | None = None,
                         ping_role: discord.Role | None = None):
         dt = parse_datetime(date, time)
         if dt is None:
             await interaction.response.send_message(
-                embed=embeds.err("Не понял дату или время. Пример: дата `25.11.2026`, время `19:00`."),
-                ephemeral=True,
+                embed=embeds.err("Не понял дату или время. Пример: дата `25.11.2026`, время `19:00`."), ephemeral=True
             )
             return
         if dt < datetime.now(TZ):
-            await interaction.response.send_message(
-                embed=embeds.err("Эта дата уже в прошлом."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Эта дата уже в прошлом."), ephemeral=True)
             return
-
         await interaction.response.defer(ephemeral=True)
         ev = {
-            "title": title,
-            "description": description.replace("\\n", "\n")[:1000],
-            "server": server[:200] if server else None,
-            "ts": int(dt.timestamp()),
-            "closed": 0,
+            "title": title, "description": description.replace("\\n", "\n")[:1000],
+            "server": server[:200] if server else None, "ts": int(dt.timestamp()), "closed": 0,
             "creator_name": interaction.user.display_name,
         }
         try:
             message = await interaction.channel.send(
-                content=ping_role.mention if ping_role else None,
-                embed=build_embed(ev, []),
-                view=WipeView(),
+                content=ping_role.mention if ping_role else None, embed=build_embed(ev, []), view=WipeView(),
                 allowed_mentions=discord.AllowedMentions(roles=True),
             )
         except discord.Forbidden:
-            await interaction.followup.send(
-                embed=embeds.err("У меня нет прав писать в этот канал."), ephemeral=True
-            )
+            await interaction.followup.send(embed=embeds.err("У меня нет прав писать в этот канал."), ephemeral=True)
             return
-
         await self.bot.db.execute(
             "INSERT INTO wipe_events(message_id, guild_id, channel_id, creator_id, creator_name, title, "
             "description, server, ts, ask_reason, ping_role_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (message.id, interaction.guild.id, message.channel.id, interaction.user.id,
-             ev["creator_name"], ev["title"], ev["description"], ev["server"], ev["ts"],
-             int(ask_for_reason), ping_role.id if ping_role else None),
+            (message.id, interaction.guild.id, message.channel.id, interaction.user.id, ev["creator_name"],
+             ev["title"], ev["description"], ev["server"], ev["ts"], int(ask_for_reason),
+             ping_role.id if ping_role else None),
         )
         await interaction.followup.send(embed=embeds.ok("Событие создано."), ephemeral=True)
 
@@ -2060,8 +1734,8 @@ class Wipe(commands.Cog):
     )
     @app_commands.guild_only()
     @access("wipe")
-    async def noreact(self, interaction: discord.Interaction, message: str,
-                      role: discord.Role | None = None, ping: bool = False):
+    async def noreact(self, interaction: discord.Interaction, message: str, role: discord.Role | None = None,
+                      ping: bool = False):
         guild = interaction.guild
         match = LINK_RE.search(message)
         if match:
@@ -2069,13 +1743,9 @@ class Wipe(commands.Cog):
         elif message.strip().isdigit():
             channel_id, message_id = None, int(message.strip())
         else:
-            await interaction.response.send_message(
-                embed=embeds.err("Пришли ссылку на сообщение или его ID."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Пришли ссылку на сообщение или его ID."), ephemeral=True)
             return
-
         await interaction.response.defer(ephemeral=not ping)
-
         ev = await self.get_event(message_id)
         if channel_id is None:
             channel_id = ev["channel_id"] if ev else interaction.channel.id
@@ -2087,11 +1757,9 @@ class Wipe(commands.Cog):
             target = await channel.fetch_message(message_id)
         except (discord.NotFound, discord.Forbidden):
             await interaction.followup.send(
-                embed=embeds.err("Не нашёл сообщение. Если оно в другом канале — пришли ссылку."),
-                ephemeral=True,
+                embed=embeds.err("Не нашёл сообщение. Если оно в другом канале — пришли ссылку."), ephemeral=True
             )
             return
-
         if ev:
             missing = await self.pending_members(guild, channel, ev, role)
         else:
@@ -2101,11 +1769,9 @@ class Wipe(commands.Cog):
                     responded.add(user.id)
             base = role.members if role else channel.members
             missing = [m for m in base if not m.bot and m.id not in responded]
-
         if not missing:
             await interaction.followup.send(embed=embeds.ok("Все уже отреагировали 🎉"))
             return
-
         if ping:
             chunks = chunk_mentions(missing)
             await interaction.followup.send(
@@ -2113,11 +1779,8 @@ class Wipe(commands.Cog):
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
             for chunk in chunks[1:]:
-                await interaction.followup.send(
-                    content=chunk, allowed_mentions=discord.AllowedMentions(users=True)
-                )
+                await interaction.followup.send(content=chunk, allowed_mentions=discord.AllowedMentions(users=True))
             return
-
         listing = ""
         shown = 0
         for member in missing:
@@ -2189,9 +1852,7 @@ def find_violation(content, allowed):
 
 
 class AutoMod(commands.Cog):
-    automod = app_commands.Group(
-        name="automod", description="Автомодерация ссылок", guild_only=True
-    )
+    automod = app_commands.Group(name="automod", description="Автомодерация ссылок", guild_only=True)
 
     def __init__(self, bot):
         self.bot = bot
@@ -2220,7 +1881,6 @@ class AutoMod(commands.Cog):
             return
         if not URL_RE.search(message.content):
             return
-
         guild_id = message.guild.id
         if await self.bot.db.get_setting(guild_id, "automod_enabled", "1") == "0":
             return
@@ -2235,7 +1895,6 @@ class AutoMod(commands.Cog):
         guild = message.guild
         member = message.author
         db = self.bot.db
-
         deleted = True
         try:
             await message.delete()
@@ -2243,14 +1902,12 @@ class AutoMod(commands.Cog):
             pass
         except discord.Forbidden:
             deleted = False
-
         max_strikes = int(await db.get_setting(guild.id, "automod_strikes", "3"))
         timeout_minutes = int(await db.get_setting(guild.id, "automod_timeout", "10"))
         key = (guild.id, member.id)
         now = now_ts()
         history = [t for t in self.strikes.get(key, []) if now - t < STRIKE_WINDOW] + [now]
         self.strikes[key] = history
-
         action = "Сообщение удалено" if deleted else "❗ Не удалось удалить (нет прав Manage Messages)"
         timed_out = False
         if len(history) >= max_strikes and timeout_minutes > 0:
@@ -2261,7 +1918,6 @@ class AutoMod(commands.Cog):
                 action += f" • тайм-аут на {timeout_minutes} мин."
             except (discord.Forbidden, discord.HTTPException):
                 action += " • тайм-аут выдать не удалось (роль бота ниже участника)"
-
         try:
             warning = embeds.warn(
                 f"{member.mention}, отправка ссылок здесь запрещена.\n"
@@ -2273,7 +1929,6 @@ class AutoMod(commands.Cog):
             await message.channel.send(embed=warning, delete_after=10)
         except discord.HTTPException:
             pass
-
         log_embed = embeds.make("🛡️ AutoMod: нежелательная ссылка", color=config.COLOR_WARN)
         log_embed.add_field(name="Участник", value=f"{member.mention} (`{member.id}`)", inline=True)
         log_embed.add_field(name="Канал", value=message.channel.mention, inline=True)
@@ -2305,13 +1960,11 @@ class AutoMod(commands.Cog):
         embed = embeds.make("🛡️ Автомодерация ссылок")
         embed.add_field(name="Состояние", value="🟢 Включена" if enabled else "🔴 Выключена", inline=True)
         embed.add_field(name="Тайм-аут", value=f"после {strikes} нарушений • {timeout} мин.", inline=True)
-        embed.add_field(name="Разрешённые домены", value="\n".join(f"`{d}`" for d in domains)[:1000] or "—",
-                        inline=False)
+        embed.add_field(name="Разрешённые домены", value="\n".join(f"`{d}`" for d in domains)[:1000] or "—", inline=False)
         embed.add_field(name="Игнорируемые роли",
                         value=" ".join(f"<@&{r}>" for r in bypass) or "— (модераторы с Manage Messages и админы не проверяются)",
                         inline=False)
-        embed.add_field(name="Игнорируемые каналы", value=" ".join(f"<#{c}>" for c in ignored) or "—",
-                        inline=False)
+        embed.add_field(name="Игнорируемые каналы", value=" ".join(f"<#{c}>" for c in ignored) or "—", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @automod.command(name="toggle", description="Включить или выключить автомодерацию")
@@ -2330,9 +1983,8 @@ class AutoMod(commands.Cog):
         if "." not in domain:
             await interaction.response.send_message(embed=embeds.err("Это не похоже на домен."), ephemeral=True)
             return
-        changed = await self.bot.db.execute(
-            "INSERT OR IGNORE INTO allowed_domains(guild_id, domain) VALUES(?,?)", (interaction.guild.id, domain)
-        )
+        changed = await self.bot.db.execute("INSERT OR IGNORE INTO allowed_domains(guild_id, domain) VALUES(?,?)",
+                                            (interaction.guild.id, domain))
         text = f"`{domain}` разрешён (вместе с поддоменами)." if changed else f"`{domain}` уже разрешён."
         await interaction.response.send_message(embed=embeds.ok(text), ephemeral=True)
 
@@ -2341,9 +1993,8 @@ class AutoMod(commands.Cog):
     @access("automod")
     async def disallow(self, interaction: discord.Interaction, domain: str):
         domain = normalize_domain(domain)
-        changed = await self.bot.db.execute(
-            "DELETE FROM allowed_domains WHERE guild_id=? AND domain=?", (interaction.guild.id, domain)
-        )
+        changed = await self.bot.db.execute("DELETE FROM allowed_domains WHERE guild_id=? AND domain=?",
+                                            (interaction.guild.id, domain))
         if changed:
             text = f"`{domain}` больше не разрешён."
         elif domain in config.DEFAULT_ALLOWED_DOMAINS:
@@ -2368,8 +2019,7 @@ class AutoMod(commands.Cog):
     @automod.command(name="ignore_channel", description="Канал, где ссылки разрешены")
     @app_commands.describe(channel="Канал", enabled="True — разрешить ссылки, False — снова проверять")
     @access("automod")
-    async def ignore_channel(self, interaction: discord.Interaction, channel: discord.TextChannel,
-                             enabled: bool = True):
+    async def ignore_channel(self, interaction: discord.Interaction, channel: discord.TextChannel, enabled: bool = True):
         gid = interaction.guild.id
         if enabled:
             await self.bot.db.add_target(gid, "automod_ignore_channel", channel.id)
@@ -2404,10 +2054,8 @@ from discord.ext import commands
 from .. import config, embeds
 from ..checks import access, is_admin
 
-TARGET_CHOICES = [
-    app_commands.Choice(name="Участники", value="member"),
-    app_commands.Choice(name="Боты", value="bot"),
-]
+TARGET_CHOICES = [app_commands.Choice(name="Участники", value="member"),
+                  app_commands.Choice(name="Боты", value="bot")]
 
 
 class RoleTools(commands.Cog):
@@ -2446,16 +2094,13 @@ class RoleTools(commands.Cog):
             return
         has_role = role in member.roles
         if give and has_role:
-            await interaction.response.send_message(
-                embed=embeds.info(f"У {member.mention} уже есть {role.mention}."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.info(f"У {member.mention} уже есть {role.mention}."),
+                                                    ephemeral=True)
             return
         if not give and not has_role:
-            await interaction.response.send_message(
-                embed=embeds.info(f"У {member.mention} нет роли {role.mention}."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.info(f"У {member.mention} нет роли {role.mention}."),
+                                                    ephemeral=True)
             return
-
         audit = f"{interaction.user} через VEX" + (f": {reason}" if reason else "")
         try:
             if give:
@@ -2463,17 +2108,12 @@ class RoleTools(commands.Cog):
             else:
                 await member.remove_roles(role, reason=audit)
         except discord.Forbidden:
-            await interaction.response.send_message(
-                embed=embeds.err("У меня не хватает прав (Manage Roles) или роль выше моей."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("У меня не хватает прав (Manage Roles) или роль выше моей."),
+                                                    ephemeral=True)
             return
-
         verb = "выдана" if give else "снята"
         text = f"Роль {role.mention} {verb}: {member.mention}"
-        await interaction.response.send_message(
-            embed=embeds.ok(text), allowed_mentions=discord.AllowedMentions.none()
-        )
-
+        await interaction.response.send_message(embed=embeds.ok(text), allowed_mentions=discord.AllowedMentions.none())
         log = embeds.make(f"🎭 Роль {verb}", color=config.COLOR_MAIN)
         log.add_field(name="Участник", value=member.mention, inline=True)
         log.add_field(name="Роль", value=role.mention, inline=True)
@@ -2564,8 +2204,7 @@ class AutoRole(commands.Cog):
     @app_commands.describe(role="Роль", target="Кому выдавать")
     @app_commands.choices(target=TARGET_CHOICES)
     @access("autorole")
-    async def add(self, interaction: discord.Interaction, role: discord.Role,
-                  target: app_commands.Choice[str]):
+    async def add(self, interaction: discord.Interaction, role: discord.Role, target: app_commands.Choice[str]):
         if role.managed or role.is_default() or role >= interaction.guild.me.top_role:
             await interaction.response.send_message(
                 embed=embeds.err("Эту роль я выдать не смогу: она выше моей, управляется интеграцией или это @everyone."),
@@ -2582,8 +2221,7 @@ class AutoRole(commands.Cog):
     @app_commands.describe(role="Роль", target="Кому выдавалась")
     @app_commands.choices(target=TARGET_CHOICES)
     @access("autorole")
-    async def remove(self, interaction: discord.Interaction, role: discord.Role,
-                     target: app_commands.Choice[str]):
+    async def remove(self, interaction: discord.Interaction, role: discord.Role, target: app_commands.Choice[str]):
         kind = "autorole_bot" if target.value == "bot" else "autorole_member"
         removed = await self.bot.db.remove_target(interaction.guild.id, kind, role.id)
         text = f"{role.mention} убрана из авто-выдачи." if removed else f"{role.mention} не была в списке."
@@ -2624,36 +2262,27 @@ class SayModal(discord.ui.Modal):
         self.attachment = attachment
         self.heading = None
         if use_embed:
-            self.heading = discord.ui.TextInput(
-                label="Заголовок (необязательно)", required=False, max_length=256
-            )
+            self.heading = discord.ui.TextInput(label="Заголовок (необязательно)", required=False, max_length=256)
             self.add_item(self.heading)
-        self.body = discord.ui.TextInput(
-            label="Текст сообщения",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=4000 if use_embed else 2000,
-        )
+        self.body = discord.ui.TextInput(label="Текст сообщения", style=discord.TextStyle.paragraph, required=True,
+                                         max_length=4000 if use_embed else 2000)
         self.add_item(self.body)
 
     async def on_submit(self, interaction):
         await interaction.response.defer(ephemeral=True)
         text = str(self.body)
-
         file = None
         if self.attachment is not None:
             try:
                 file = await self.attachment.to_file()
             except discord.HTTPException:
                 file = None
-
         reference = None
         if self.reply_to:
             try:
                 reference = await self.channel.fetch_message(self.reply_to)
             except (discord.NotFound, discord.Forbidden):
                 reference = None
-
         mentions = discord.AllowedMentions(users=True, roles=True, everyone=False, replied_user=False)
         try:
             if self.use_embed:
@@ -2663,29 +2292,20 @@ class SayModal(discord.ui.Modal):
                     embed.title = heading
                 if file is not None and (self.attachment.content_type or "").startswith("image/"):
                     embed.set_image(url=f"attachment://{file.filename}")
-                sent = await self.channel.send(
-                    embed=embed, file=file, reference=reference, allowed_mentions=mentions
-                )
+                sent = await self.channel.send(embed=embed, file=file, reference=reference, allowed_mentions=mentions)
             else:
-                sent = await self.channel.send(
-                    content=text, file=file, reference=reference, allowed_mentions=mentions
-                )
+                sent = await self.channel.send(content=text, file=file, reference=reference, allowed_mentions=mentions)
         except discord.Forbidden:
-            await interaction.followup.send(
-                embed=embeds.err(f"У меня нет прав писать в {self.channel.mention}."), ephemeral=True
-            )
+            await interaction.followup.send(embed=embeds.err(f"У меня нет прав писать в {self.channel.mention}."),
+                                            ephemeral=True)
             return
-
         log = embeds.make("🕵️ Сообщение от имени бота", color=config.COLOR_MAIN)
         log.add_field(name="Отправил", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
         log.add_field(name="Канал", value=self.channel.mention, inline=True)
         log.add_field(name="Сообщение", value=f"[Перейти]({sent.jump_url})", inline=True)
         log.add_field(name="Текст", value=text[:1000], inline=False)
         await self.cog.bot.send_log(interaction.guild, log)
-
-        await interaction.followup.send(
-            embed=embeds.ok(f"Отправлено в {self.channel.mention}."), ephemeral=True
-        )
+        await interaction.followup.send(embed=embeds.ok(f"Отправлено в {self.channel.mention}."), ephemeral=True)
 
 
 class Staff(commands.Cog):
@@ -2694,33 +2314,27 @@ class Staff(commands.Cog):
 
     @app_commands.command(name="say", description="Отправить сообщение от имени бота")
     @app_commands.describe(
-        channel="Куда отправить (по умолчанию — текущий канал)",
-        embed="Оформить красивым эмбедом",
-        reply_to="ID сообщения, на которое ответить",
-        attachment="Прикрепить файл или картинку",
+        channel="Куда отправить (по умолчанию — текущий канал)", embed="Оформить красивым эмбедом",
+        reply_to="ID сообщения, на которое ответить", attachment="Прикрепить файл или картинку",
     )
     @app_commands.guild_only()
     @access("say")
-    async def say(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None,
-                  embed: bool = False, reply_to: str | None = None,
-                  attachment: discord.Attachment | None = None):
+    async def say(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None, embed: bool = False,
+                  reply_to: str | None = None, attachment: discord.Attachment | None = None):
         channel = channel or interaction.channel
         if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(
-                embed=embeds.err("Писать можно только в текстовые каналы."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err("Писать можно только в текстовые каналы."),
+                                                    ephemeral=True)
             return
         if not channel.permissions_for(interaction.guild.me).send_messages:
-            await interaction.response.send_message(
-                embed=embeds.err(f"У меня нет прав писать в {channel.mention}."), ephemeral=True
-            )
+            await interaction.response.send_message(embed=embeds.err(f"У меня нет прав писать в {channel.mention}."),
+                                                    ephemeral=True)
             return
         reply_id = None
         if reply_to:
             if not reply_to.strip().isdigit():
-                await interaction.response.send_message(
-                    embed=embeds.err("`reply_to` — это числовой ID сообщения."), ephemeral=True
-                )
+                await interaction.response.send_message(embed=embeds.err("`reply_to` — это числовой ID сообщения."),
+                                                        ephemeral=True)
                 return
             reply_id = int(reply_to.strip())
         await interaction.response.send_modal(SayModal(self, channel, embed, reply_id, attachment))
@@ -2737,10 +2351,7 @@ from discord.ext import commands
 from .. import config, embeds
 from ..checks import admin_only
 
-KEY_CHOICES = [
-    app_commands.Choice(name=f"{key} — {desc}"[:100], value=key)
-    for key, desc in config.COMMAND_KEYS.items()
-]
+KEY_CHOICES = [app_commands.Choice(name=f"{key} — {desc}"[:100], value=key) for key, desc in config.COMMAND_KEYS.items()]
 
 DEFAULT_WELCOME = (
     "Привет, {user}! Добро пожаловать на **{server}**.\n"
@@ -2749,12 +2360,8 @@ DEFAULT_WELCOME = (
 
 
 class Permissions(commands.Cog):
-    perms = app_commands.Group(
-        name="perms",
-        description="Какие роли имеют доступ к каким командам бота",
-        guild_only=True,
-        default_permissions=discord.Permissions(administrator=True),
-    )
+    perms = app_commands.Group(name="perms", description="Какие роли имеют доступ к каким командам бота", guild_only=True,
+                               default_permissions=discord.Permissions(administrator=True))
 
     def __init__(self, bot):
         self.bot = bot
@@ -2763,8 +2370,7 @@ class Permissions(commands.Cog):
     @app_commands.describe(command="Группа команд", role="Роль")
     @app_commands.choices(command=KEY_CHOICES)
     @admin_only()
-    async def grant(self, interaction: discord.Interaction, command: app_commands.Choice[str],
-                    role: discord.Role):
+    async def grant(self, interaction: discord.Interaction, command: app_commands.Choice[str], role: discord.Role):
         added = await self.bot.db.add_target(interaction.guild.id, f"cmd:{command.value}", role.id)
         text = (f"{role.mention} теперь имеет доступ: **{command.value}**."
                 if added else f"{role.mention} уже имеет доступ к **{command.value}**.")
@@ -2774,8 +2380,7 @@ class Permissions(commands.Cog):
     @app_commands.describe(command="Группа команд", role="Роль")
     @app_commands.choices(command=KEY_CHOICES)
     @admin_only()
-    async def revoke(self, interaction: discord.Interaction, command: app_commands.Choice[str],
-                     role: discord.Role):
+    async def revoke(self, interaction: discord.Interaction, command: app_commands.Choice[str], role: discord.Role):
         removed = await self.bot.db.remove_target(interaction.guild.id, f"cmd:{command.value}", role.id)
         text = (f"У {role.mention} больше нет доступа к **{command.value}**."
                 if removed else f"У {role.mention} и не было доступа к **{command.value}**.")
@@ -2803,12 +2408,8 @@ class Permissions(commands.Cog):
 
 
 class ServerConfig(commands.Cog):
-    config_group = app_commands.Group(
-        name="config",
-        description="Настройки бота на сервере",
-        guild_only=True,
-        default_permissions=discord.Permissions(administrator=True),
-    )
+    config_group = app_commands.Group(name="config", description="Настройки бота на сервере", guild_only=True,
+                                      default_permissions=discord.Permissions(administrator=True))
 
     def __init__(self, bot):
         self.bot = bot
@@ -2818,25 +2419,19 @@ class ServerConfig(commands.Cog):
     @admin_only()
     async def log_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await self.bot.db.set_setting(interaction.guild.id, "mod_log", channel.id)
-        await interaction.response.send_message(
-            embed=embeds.ok(f"Логи будут приходить в {channel.mention}."), ephemeral=True
-        )
+        await interaction.response.send_message(embed=embeds.ok(f"Логи будут приходить в {channel.mention}."), ephemeral=True)
 
     @config_group.command(name="welcome", description="Включить приветствие новых участников")
-    @app_commands.describe(channel="Канал приветствий",
-                           text="Текст. Можно {user}, {server}. Пусто — стандартный")
+    @app_commands.describe(channel="Канал приветствий", text="Текст. Можно {user}, {server}. Пусто — стандартный")
     @admin_only()
-    async def welcome(self, interaction: discord.Interaction, channel: discord.TextChannel,
-                      text: str | None = None):
+    async def welcome(self, interaction: discord.Interaction, channel: discord.TextChannel, text: str | None = None):
         gid = interaction.guild.id
         await self.bot.db.set_setting(gid, "welcome_channel", channel.id)
         if text:
             await self.bot.db.set_setting(gid, "welcome_text", text.replace("\\n", "\n"))
         else:
             await self.bot.db.del_setting(gid, "welcome_text")
-        await interaction.response.send_message(
-            embed=embeds.ok(f"Приветствия включены в {channel.mention}."), ephemeral=True
-        )
+        await interaction.response.send_message(embed=embeds.ok(f"Приветствия включены в {channel.mention}."), ephemeral=True)
 
     @config_group.command(name="welcome_off", description="Выключить приветствие")
     @admin_only()
@@ -2872,7 +2467,6 @@ class ServerConfig(commands.Cog):
         log.add_field(name="Аккаунт создан", value=discord.utils.format_dt(member.created_at, "R"), inline=True)
         log.set_thumbnail(url=member.display_avatar.url)
         await self.bot.send_log(member.guild, log)
-
         channel_id = await self.bot.db.get_setting(gid, "welcome_channel")
         if not channel_id or member.bot:
             return
@@ -2904,16 +2498,11 @@ class Help(commands.Cog):
 
     @app_commands.command(name="help", description="Что умеет VEX")
     async def help(self, interaction: discord.Interaction):
-        embed = embeds.make(
-            "🟣 VEX — управление кланом",
-            "Бот для организации клана: тикеты, события, роли и защита сервера.",
-        )
-        embed.add_field(
-            name="🎫 Тикеты",
-            value="`/ticket panel` `/ticket setup` `/ticket support_add`\n"
-                  "Внутри тикета: `/ticket add` `remove` `rename` `close`",
-            inline=False,
-        )
+        embed = embeds.make("🟣 VEX — управление кланом",
+                            "Бот для организации клана: тикеты, события, роли и защита сервера.")
+        embed.add_field(name="🎫 Тикеты",
+                        value="`/ticket panel` `/ticket setup` `/ticket support_add`\n"
+                              "Внутри тикета: `/ticket add` `remove` `rename` `close`", inline=False)
         embed.add_field(name="📝 События", value="`/wipereact` — сбор с кнопками • `/noreact` — кто не ответил",
                         inline=False)
         embed.add_field(name="🎭 Роли", value="`/role add` `/role remove` • `/autorole add` `remove` `list`",
@@ -2935,8 +2524,6 @@ async def setup(bot):
 
 
 class _EmbeddedFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    """Отдаёт модули vex.* прямо из словаря _SOURCES, без файлов на диске."""
-
     def find_spec(self, fullname, path=None, target=None):
         if fullname not in _SOURCES:
             return None
@@ -2961,10 +2548,7 @@ def main():
     from vex import config
     from vex.bot import VexBot
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not config.TOKEN:
         raise SystemExit("Не задана переменная окружения DISCORD_TOKEN")
     VexBot().run(config.TOKEN, log_handler=None)
