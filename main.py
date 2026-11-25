@@ -858,12 +858,13 @@ class Panel(commands.Cog):
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def panel(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         if not (isinstance(interaction.user, discord.Member) and is_admin(interaction.user)):
-            await interaction.response.send_message(embed=embeds.err("Только администраторы."), ephemeral=True)
+            await interaction.followup.send(embed=embeds.err("Только администраторы."), ephemeral=True)
             return
-        await self.show_main(interaction)
+        await self.show_main(interaction, initial=True)
 
-    async def show_main(self, interaction):
+    async def show_main(self, interaction, initial=False):
         embed = embeds.make(
             "🟣 VEX — панель управления",
             "Всё управление ботом в одном месте. Выбери раздел:",
@@ -874,7 +875,9 @@ class Panel(commands.Cog):
             inline=False,
         )
         view = MainView(self)
-        if interaction.response.is_done():
+        if initial:
+            await interaction.edit_original_response(embed=embed, view=view)
+        elif interaction.response.is_done():
             await interaction.edit_original_response(embed=embed, view=view)
         else:
             await interaction.response.edit_message(embed=embed, view=view)
@@ -1037,20 +1040,21 @@ class Panel(commands.Cog):
         await interaction.response.send_modal(GeneralModal(self, text or "Привет, {user}! Добро пожаловать на **{server}**."))
 
     async def send_ticket_panel(self, interaction):
+        await interaction.response.defer(ephemeral=True)
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(embed=embeds.err("Только в текстовый канал."), ephemeral=True)
+            await interaction.followup.send(embed=embeds.err("Только в текстовый канал."), ephemeral=True)
             return
         cog = self.bot.get_cog("Tickets")
         if cog is None:
-            await interaction.response.send_message(embed=embeds.err("Модуль тикетов не загружен."), ephemeral=True)
+            await interaction.followup.send(embed=embeds.err("Модуль тикетов не загружен."), ephemeral=True)
             return
         try:
             await channel.send(embed=cog.panel_embed(), view=cog.TicketPanelView())
         except discord.Forbidden:
-            await interaction.response.send_message(embed=embeds.err("Нет прав писать в этот канал."), ephemeral=True)
+            await interaction.followup.send(embed=embeds.err("Нет прав писать в этот канал."), ephemeral=True)
             return
-        await interaction.response.send_message(embed=embeds.ok(f"Панель отправлена в {channel.mention}."), ephemeral=True)
+        await interaction.followup.send(embed=embeds.ok(f"Панель отправлена в {channel.mention}."), ephemeral=True)
 
     async def open_event(self, interaction, event):
         await interaction.response.send_message(
@@ -1264,6 +1268,9 @@ class Tickets(commands.Cog):
     async def cog_load(self):
         self.bot.add_view(TicketPanelView())
         self.bot.add_view(TicketControlView())
+
+    def panel_embed(self, title=None, description=None):
+        return panel_embed(title, description)
 
     async def get_ticket(self, channel_id):
         return await self.bot.db.fetchone(
