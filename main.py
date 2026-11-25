@@ -42,6 +42,7 @@ _SOURCES = {
     'vex': r'''"""VEX — Discord-бот для управления клан-сообществом в Rust."""
 ''',
     'vex.config': r'''"""Настройки и константы VEX. Всё, что хочется поменять «под себя», — здесь."""
+import json
 import os
 from pathlib import Path
 
@@ -67,6 +68,13 @@ GUILD_ID = _int("GUILD_ID")  # ID сервера: команды появятс�
 DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if Path("/app").is_dir() else "./data"))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
+# --- Сайт-панель -------------------------------------------------------------
+# Сайт включается, когда хостинг передаёт порт (переменная PORT, появляется вместе с опцией «Использовать домен»).
+WEB_PORT = _int("PORT") or _int("WEB_PORT")
+CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()  # Developer Portal -> OAuth2 -> Client Secret
+CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()  # необязательно: по умолчанию берётся ID бота
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")  # необязательно: https://адрес-твоего-бота
+
 # --- Оформление ------------------------------------------------------------
 BRAND = "VEX"
 FOOTER = "VEX • Clan Control"
@@ -89,6 +97,26 @@ TICKET_TYPES = [
     {"key": "other", "slug": "other", "label": "Другое", "emoji": "📨",
      "description": "Всё остальное"},
 ]
+
+def load_ticket_types(raw):
+    """Типы тикетов сервера: из настроек (JSON, их меняют на сайте) или значения по умолчанию."""
+    if raw:
+        try:
+            out = []
+            for item in json.loads(raw)[:25]:
+                out.append({
+                    "key": str(item["key"]),
+                    "slug": str(item.get("slug") or "ticket")[:20],
+                    "label": str(item["label"])[:100],
+                    "emoji": str(item.get("emoji") or ""),
+                    "description": str(item.get("description") or "")[:100],
+                })
+            if out:
+                return out
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+    return [dict(t) for t in TICKET_TYPES]
+
 
 # --- Автомодерация: домены, которые разрешены всегда ------------------------
 DEFAULT_ALLOWED_DOMAINS = (
@@ -173,6 +201,15 @@ CREATE TABLE IF NOT EXISTS allowed_domains (
     PRIMARY KEY (guild_id, domain)
 );
 
+CREATE TABLE IF NOT EXISTS automod_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id   INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    link       TEXT    NOT NULL,
+    ts         INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tickets (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id   INTEGER NOT NULL,
@@ -236,6 +273,30 @@ class Database:
         with self._lock:
             cur = self._conn.execute(sql, params)
             return cur.fetchone() if one else cur.fetchall()
+
+    def _replace(self, table, guild_id, column, kind, values):
+        with self._lock:
+            if table == "guild_targets":
+                self._conn.execute("DELETE FROM guild_targets WHERE guild_id=? AND kind=?", (guild_id, kind))
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO guild_targets(guild_id, kind, target_id) VALUES(?,?,?)",
+                    [(guild_id, kind, v) for v in values],
+                )
+            else:
+                self._conn.execute("DELETE FROM allowed_domains WHERE guild_id=?", (guild_id,))
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO allowed_domains(guild_id, domain) VALUES(?,?)",
+                    [(guild_id, v) for v in values],
+                )
+            self._conn.commit()
+
+    async def set_targets(self, guild_id, kind, ids):
+        """Полностью заменяет список ролей/каналов этого назначения."""
+        await asyncio.to_thread(self._replace, "guild_targets", guild_id, None, kind, list(ids))
+
+    async def set_domains(self, guild_id, domains):
+        """Полностью заменяет список разрешённых доменов сервера."""
+        await asyncio.to_thread(self._replace, "allowed_domains", guild_id, None, None, list(domains))
 
     async def execute(self, sql, params=()):
         """Выполняет запрос, возвращает число затронутых строк."""
@@ -359,6 +420,7 @@ from discord.ext import commands
 from . import config, embeds
 from .checks import NoAccess
 from .db import Database
+from .web import start_web
 
 log = logging.getLogger("vex")
 
@@ -411,6 +473,12 @@ class VexBot(commands.Bot):
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
         )
         self.db = Database(config.DATA_DIR / "vex.sqlite3")
+        self.web_runner = None
+
+    async def close(self):
+        if self.web_runner is not None:
+            await self.web_runner.cleanup()
+        await super().close()
 
     async def setup_hook(self):
         self.db.connect()
@@ -425,6 +493,7 @@ class VexBot(commands.Bot):
         else:
             synced = await self.tree.sync()
         log.info("Синхронизировано команд: %d", len(synced))
+        self.web_runner = await start_web(self)
 
     async def on_ready(self):
         log.info("VEX запущен как %s (серверов: %d)", self.user, len(self.guilds))
@@ -447,6 +516,1174 @@ class VexBot(commands.Bot):
         except discord.HTTPException:
             log.warning("Не удалось отправить лог в канал %s", channel_id)
 ''',
+    'vex.webui': r'''"""Страницы сайта VEX: чистые функции «данные -> HTML». Без зависимостей от discord и aiohttp.
+
+Во всех формах стоит метка __CSRF__ — layout() заменяет её на токен сессии.
+"""
+import html
+import re
+import zlib
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+FLASH_OK = {
+    "saved": "Сохранено.",
+    "sent": "Панель отправлена в канал.",
+    "deleted": "Удалено.",
+    "reminded": "Напоминание отправлено.",
+    "noone": "Все уже ответили — напоминать некому.",
+}
+FLASH_ERR = {
+    "denied": "Вход отменён.",
+    "state": "Не удалось подтвердить вход. Попробуй ещё раз.",
+    "oauth": "Discord не принял вход. Проверь Client Secret и Redirect URI в Developer Portal.",
+    "nosecret": "Сайт не настроен: не задана переменная DISCORD_CLIENT_SECRET.",
+    "types_empty": "Добавь хотя бы один тип обращения.",
+    "types_many": "Типов обращений может быть не больше 25.",
+    "channel": "Выбери канал из списка.",
+    "noperm": "У VEX нет прав писать в этот канал.",
+    "noevent": "Событие не найдено.",
+    "nocog": "Модуль бота ещё не загружен, попробуй через минуту.",
+}
+
+NAV = [
+    ("", "Обзор", "🏠"),
+    ("access", "Доступ к командам", "🔐"),
+    ("roles", "Роли", "🎭"),
+    ("automod", "Автомодерация", "🛡️"),
+    ("tickets", "Тикеты", "🎫"),
+    ("events", "События", "📝"),
+    ("general", "Общие", "⚙️"),
+]
+
+CSS = """
+:root{color-scheme:dark;--bg:#0e0a1a;--panel:#171124;--panel2:#1e1730;--line:#2d2447;--text:#eee9fb;--muted:#9d93bd;
+--brand:#8b5cf6;--brand2:#6d28d9;--ok:#22c55e;--err:#ef4444;--warn:#f59e0b;--r:14px}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;min-height:100vh;color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Arial,sans-serif;
+background:radial-gradient(900px 500px at 85% -10%,#2b1b57 0,transparent 60%),radial-gradient(700px 400px at -10% 110%,#1d1240 0,transparent 55%),var(--bg)}
+a{color:#c4b5fd;text-decoration:none}a:hover{text-decoration:underline}
+code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:.9em}
+h1{font-size:26px;margin:0 0 4px;letter-spacing:-.01em}h2{font-size:18px;margin:0 0 4px}h3{font-size:15px;margin:0 0 8px}
+.muted,.sub{color:var(--muted)}
+.top{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:rgba(14,10,26,.75);
+backdrop-filter:blur(8px);position:sticky;top:0;z-index:5}
+.brand{display:flex;align-items:baseline;gap:10px;color:var(--text)}.brand:hover{text-decoration:none}
+.brand b{font-size:20px;letter-spacing:.12em;background:linear-gradient(135deg,#c4b5fd,#8b5cf6);-webkit-background-clip:text;background-clip:text;color:transparent}
+.brand small{color:var(--muted);font-size:12px}
+.spacer{flex:1}
+.user{display:flex;align-items:center;gap:10px}.user img{border-radius:50%}.user form{margin:0}
+.link{background:none;border:0;color:#c4b5fd;cursor:pointer;font:inherit;padding:0}.link:hover{text-decoration:underline}
+.shell{display:block;max-width:1120px;margin:0 auto;padding:24px 20px 60px}
+.shell.has-side{display:grid;grid-template-columns:230px minmax(0,1fr);gap:28px;max-width:1280px}
+.side{position:sticky;top:76px;align-self:start}
+.guild{display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:12px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);font-weight:600}
+.side nav{display:flex;flex-direction:column;gap:2px}
+.side nav a{display:flex;gap:10px;align-items:center;padding:9px 12px;border-radius:10px;color:var(--text)}
+.side nav a:hover{background:var(--panel);text-decoration:none}
+.side nav a.active{background:linear-gradient(135deg,rgba(139,92,246,.32),rgba(109,40,217,.22));box-shadow:inset 0 0 0 1px rgba(139,92,246,.55)}
+.ico{width:32px;height:32px;border-radius:50%;flex:none;object-fit:cover}
+.ico.ph{display:grid;place-items:center;background:var(--brand2);font-weight:700}
+.head{margin-bottom:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;margin-bottom:16px}
+.card>h2{margin-bottom:2px}.card>.sub{margin:0 0 14px}
+.block{padding:14px 0;border-top:1px solid var(--line)}.block:first-of-type{border-top:0;padding-top:4px}
+.block h3 small{color:var(--muted);font-weight:400;margin-left:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.tile b{display:block;font-size:24px;line-height:1.2}.tile span{color:var(--muted);font-size:13px}
+.gcard{display:flex;align-items:center;gap:12px;padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);color:var(--text)}
+.gcard:hover{border-color:var(--brand);text-decoration:none;transform:translateY(-1px)}
+.gcard small{display:block;color:var(--muted)}
+.field{margin:0 0 16px}.field>label,.field>.lbl{display:block;font-weight:600;margin-bottom:6px}
+.hint{color:var(--muted);font-size:13px;margin-top:4px}
+input[type=text],input[type=number],select,textarea{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:inherit}
+input:focus,select:focus,textarea:focus{outline:2px solid rgba(139,92,246,.6);outline-offset:1px;border-color:var(--brand)}
+textarea{min-height:110px;resize:vertical}textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13.5px}
+input[type=number]{max-width:140px}
+.row{display:flex;gap:16px;flex-wrap:wrap}.row .field{flex:1;min-width:170px}
+.check{display:flex;align-items:center;gap:10px;cursor:pointer}.check input{width:18px;height:18px;accent-color:var(--brand)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{position:relative}.chip input{position:absolute;opacity:0;inset:0;width:100%;height:100%;cursor:pointer;margin:0}
+.chip span{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:1px solid var(--line);border-radius:999px;background:var(--panel2);color:var(--muted);transition:.12s}
+.chip:hover span{border-color:var(--brand);color:var(--text)}
+.chip input:checked+span{background:var(--brand2);border-color:var(--brand);color:#fff}
+.chip input:focus-visible+span{outline:2px solid #c4b5fd;outline-offset:2px}
+.chip.locked{opacity:.45}.chip.locked input{cursor:not-allowed}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
+.actions{margin-top:6px;display:flex;gap:10px;flex-wrap:wrap}
+.btn{background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;border:0;border-radius:10px;padding:10px 18px;font:inherit;font-weight:600;cursor:pointer}
+.btn:hover{filter:brightness(1.1);text-decoration:none}
+.btn.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--text)}
+.btn.danger{background:#b91c1c}.btn.sm{padding:5px 12px;font-size:13px}
+.flash{padding:12px 16px;border-radius:12px;margin-bottom:16px;border:1px solid}
+.flash.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.5)}
+.flash.err{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.55)}
+.flash.warn{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.5)}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px 10px;border-top:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:13px;border-top:0}
+.tablewrap{overflow-x:auto}
+ul.health{list-style:none;margin:0;padding:0}ul.health li{padding:6px 0}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;background:var(--panel2);border:1px solid var(--line)}
+.pill.on{background:rgba(34,197,94,.15);border-color:rgba(34,197,94,.5)}.pill.off{background:rgba(239,68,68,.15);border-color:rgba(239,68,68,.5)}
+.inline{display:inline-block;margin:0 6px 4px 0}
+details summary{cursor:pointer;color:#fca5a5;display:inline-block}
+.hero{text-align:center;padding:70px 10px 40px}.hero h1{font-size:40px}.hero p{color:var(--muted);max-width:520px;margin:10px auto 26px}
+@media (max-width:860px){
+.shell.has-side{grid-template-columns:minmax(0,1fr);gap:14px}
+.side{position:static;min-width:0}.side nav{flex-direction:row;overflow-x:auto;padding-bottom:6px}.side nav a{white-space:nowrap}
+main{min-width:0}.shell{padding:16px 16px 50px}.card{padding:16px}
+.top{padding:10px 14px}.brand small,.user span{display:none}.hero h1{font-size:30px}
+}
+"""
+
+
+def esc(value):
+    return html.escape(str(value), quote=True)
+
+
+# --------------------------------------------------------------------------- разбор форм
+def is_emoji(text):
+    """Грубая проверка «это эмодзи» (Discord отклоняет мусор в SelectOption)."""
+    return bool(text) and len(text) <= 8 and all(ord(ch) > 0x2000 for ch in text)
+
+
+def make_slug(label):
+    return re.sub(r"[^\w]+", "-", label.lower()).strip("-")[:20] or "ticket"
+
+
+def types_to_text(types):
+    return "\n".join(f"{t.get('emoji', '')} | {t['label']} | {t.get('description', '')}" for t in types)
+
+
+def parse_types_text(text, existing):
+    """Строки вида «эмодзи | Название | Описание» -> (список типов, код ошибки).
+
+    existing: {название в нижнем регистре: (key, slug)} — чтобы старые тикеты не теряли свой тип.
+    """
+    types, used = [], set()
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 3:
+            emoji, label, desc = parts[0], parts[1], " | ".join(parts[2:])
+        elif len(parts) == 2:
+            if is_emoji(parts[0]):
+                emoji, label, desc = parts[0], parts[1], ""
+            else:
+                emoji, label, desc = "", parts[0], parts[1]
+        else:
+            emoji, label, desc = "", parts[0], ""
+        if not is_emoji(emoji):
+            emoji = ""
+        label, desc = label[:100], desc[:100]
+        if not label:
+            continue
+        found = existing.get(label.lower())
+        key = found[0] if found else f"{zlib.crc32(label.lower().encode('utf-8')):08x}"
+        slug = found[1] if found else make_slug(label)
+        if key in used:
+            continue
+        used.add(key)
+        types.append({"key": key, "slug": slug, "label": label, "emoji": emoji, "description": desc})
+    if not types:
+        return None, "types_empty"
+    if len(types) > 25:
+        return None, "types_many"
+    return types, None
+
+
+def fmt_ts(ts, tz):
+    try:
+        return datetime.fromtimestamp(int(ts), ZoneInfo(tz)).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(ts)
+
+
+# --------------------------------------------------------------------------- кирпичики
+def icon(url, name, size=32):
+    if url:
+        return f'<img class="ico" src="{esc(url)}" alt="" width="{size}" height="{size}">'
+    letter = esc((name or "?")[:1].upper())
+    return f'<span class="ico ph" style="width:{size}px;height:{size}px">{letter}</span>'
+
+
+def chips(name, items, selected, empty="Ничего не найдено."):
+    if not items:
+        return f'<p class="muted">{esc(empty)}</p>'
+    sel = set(selected)
+    out = ['<div class="chips">']
+    for it in items:
+        locked = bool(it.get("locked"))
+        checked = " checked" if (it["id"] in sel and not locked) else ""
+        dot = ""
+        if "color" in it:
+            color = it["color"] or 0x99AAB5
+            dot = f'<i class="dot" style="background:#{color:06x}"></i>'
+        lock = "🔒 " if locked else ""
+        out.append(
+            f'<label class="chip{" locked" if locked else ""}"><input type="checkbox" name="{esc(name)}" '
+            f'value="{it["id"]}"{checked}{" disabled" if locked else ""}><span>{dot}{lock}{esc(it["name"])}</span></label>'
+        )
+    out.append("</div>")
+    return "".join(out)
+
+
+def select(name, items, selected, blank="— не выбран —"):
+    out = [f'<select name="{esc(name)}"><option value="">{esc(blank)}</option>']
+    for it in items:
+        sel = " selected" if selected is not None and it["id"] == selected else ""
+        out.append(f'<option value="{it["id"]}"{sel}>{esc(it["name"])}</option>')
+    out.append("</select>")
+    return "".join(out)
+
+
+def field(label, control, hint=""):
+    hint_html = f'<div class="hint">{hint}</div>' if hint else ""
+    return f'<div class="field"><span class="lbl">{esc(label)}</span>{control}{hint_html}</div>'
+
+
+def card(title, inner, sub=""):
+    sub_html = f'<p class="sub">{sub}</p>' if sub else ""
+    return f'<section class="card"><h2>{esc(title)}</h2>{sub_html}{inner}</section>'
+
+
+def head(title, sub=""):
+    return f'<div class="head"><h1>{esc(title)}</h1><p class="sub">{sub}</p></div>'
+
+
+def form(action, inner, button="Сохранить"):
+    return (
+        f'<form method="post" action="{esc(action)}"><input type="hidden" name="csrf" value="__CSRF__">'
+        f'{inner}<div class="actions"><button class="btn" type="submit">{esc(button)}</button></div></form>'
+    )
+
+
+def mini_form(action, button, cls="btn ghost sm"):
+    return (
+        f'<form class="inline" method="post" action="{esc(action)}"><input type="hidden" name="csrf" value="__CSRF__">'
+        f'<button class="{cls}" type="submit">{esc(button)}</button></form>'
+    )
+
+
+def tiles(items):
+    return '<div class="tiles">' + "".join(
+        f'<div class="tile"><b>{esc(v)}</b><span>{esc(l)}</span></div>' for v, l in items
+    ) + "</div>"
+
+
+def layout(title, body, *, user=None, guild=None, section=None, csrf="", ok=None, err=None):
+    flash = ""
+    if ok:
+        flash += f'<div class="flash ok">✅ {esc(FLASH_OK.get(ok, "Готово."))}</div>'
+    if err:
+        flash += f'<div class="flash err">⛔ {esc(FLASH_ERR.get(err, "Что-то пошло не так."))}</div>'
+
+    side = ""
+    switch = ""
+    if guild:
+        links = []
+        for slug, label, emoji in NAV:
+            href = f"/g/{guild['id']}" + (f"/{slug}" if slug else "")
+            cls = ' class="active"' if slug == (section or "") else ""
+            links.append(f'<a{cls} href="{href}"><span>{emoji}</span>{esc(label)}</a>')
+        side = (
+            f'<aside class="side"><div class="guild">{icon(guild.get("icon"), guild["name"])}'
+            f'<span>{esc(guild["name"])}</span></div><nav>{"".join(links)}</nav></aside>'
+        )
+        switch = '<a href="/">Сменить сервер</a>'
+
+    userbar = ""
+    if user:
+        userbar = (
+            f'<div class="user"><img src="{esc(user["avatar"])}" alt="" width="28" height="28"><span>{esc(user["name"])}</span>'
+            '<form method="post" action="/logout"><input type="hidden" name="csrf" value="__CSRF__">'
+            '<button class="link" type="submit">Выйти</button></form></div>'
+        )
+
+    page = (
+        '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"<title>{esc(title)} · VEX</title><style>{CSS}</style></head><body>"
+        '<header class="top"><a class="brand" href="/"><b>VEX</b><small>панель управления</small></a>'
+        f'<span class="spacer"></span>{switch}{userbar}</header>'
+        f'<div class="shell{" has-side" if guild else ""}">{side}<main>{flash}{body}</main></div></body></html>'
+    )
+    return page.replace("__CSRF__", esc(csrf))
+
+
+# --------------------------------------------------------------------------- страницы
+def login_page(configured):
+    if configured:
+        action = '<a class="btn" href="/login">Войти через Discord</a>'
+    else:
+        action = (
+            '<div class="flash warn">Сайт ещё не настроен: на хостинге не задана переменная '
+            "<code>DISCORD_CLIENT_SECRET</code>.</div>"
+        )
+    return (
+        '<section class="hero"><h1>VEX</h1>'
+        "<p>Панель управления ботом для клана: доступ к командам, роли, автомодерация, тикеты и события — всё в браузере.</p>"
+        f"{action}</section>"
+    )
+
+
+def guilds_page(guilds, invite_url):
+    if guilds:
+        cards = "".join(
+            f'<a class="gcard" href="/g/{g["id"]}">{icon(g.get("icon"), g["name"], 40)}'
+            f'<div><b>{esc(g["name"])}</b><small>{esc(g.get("members", ""))} участников</small></div></a>'
+            for g in guilds
+        )
+        body = f'<div class="grid">{cards}</div>'
+    else:
+        body = (
+            '<div class="flash warn">Не нашёл серверов, где ты администратор и где уже есть VEX. '
+            "Пригласи бота на свой сервер и обнови страницу.</div>"
+        )
+    body += f'<p style="margin-top:18px"><a class="btn ghost" href="{esc(invite_url)}">➕ Добавить VEX на сервер</a></p>'
+    return head("Твои серверы", "Выбери сервер, которым хочешь управлять.") + body
+
+
+def overview_page(gid, stats, health, recent):
+    t = tiles([
+        (stats["open_tickets"], "открытых тикетов"),
+        (stats["active_events"], "ближайших событий"),
+        ("вкл" if stats["automod_on"] else "выкл", "автомодерация"),
+        (stats["members"], "участников"),
+    ])
+    items = "".join(
+        f'<li>{"ℹ️" if ok is None else ("✅" if ok else "⛔")} {esc(text)}</li>' for ok, text in health
+    )
+    health_card = card("Состояние бота", f'<ul class="health">{items}</ul>')
+
+    if recent:
+        rows = "".join(
+            f"<tr><td>{esc(r['when'])}</td><td>{esc(r['user'])}</td><td>{esc(r['channel'])}</td>"
+            f"<td><code>{esc(r['link'])}</code></td></tr>"
+            for r in recent
+        )
+        table = (
+            '<div class="tablewrap"><table><tr><th>Когда</th><th>Кто</th><th>Канал</th><th>Ссылка</th></tr>'
+            f"{rows}</table></div>"
+        )
+    else:
+        table = '<p class="muted">Пока нарушений не было.</p>'
+    recent_card = card("Последние срабатывания автомодерации", table)
+
+    links = "".join(
+        f'<a class="gcard" href="/g/{gid}/{slug}"><span style="font-size:22px">{emoji}</span><b>{esc(label)}</b></a>'
+        for slug, label, emoji in NAV[1:]
+    )
+    return head("Обзор", "Состояние бота и быстрые ссылки.") + t + health_card + recent_card + f'<div class="grid">{links}</div>'
+
+
+def access_page(gid, roles, selected, keys):
+    blocks = "".join(
+        f'<div class="block"><h3><code>{esc(key)}</code><small>{esc(desc)}</small></h3>'
+        f'{chips("cmd_" + key, roles, selected.get(key, []), "На сервере нет ролей.")}</div>'
+        for key, desc in keys.items()
+    )
+    note = (
+        '<div class="flash warn">Администраторы сервера всегда имеют доступ ко всем командам. '
+        "Если у группы не выбрано ни одной роли — команды этой группы доступны только администраторам.</div>"
+    )
+    return (
+        head("Доступ к командам", "Какие роли могут пользоваться какими командами бота.")
+        + note + card("Группы команд", form(f"/g/{gid}/access", blocks))
+    )
+
+
+def roles_page(gid, assign_roles, manage_roles, member_sel, bot_sel, manageable_sel):
+    inner = (
+        '<div class="block"><h3>Роли новым участникам<small>выдаются при заходе на сервер</small></h3>'
+        + chips("autorole_member", assign_roles, member_sel)
+        + '</div><div class="block"><h3>Роли новым ботам<small>выдаются при добавлении бота</small></h3>'
+        + chips("autorole_bot", assign_roles, bot_sel)
+        + '</div><div class="block"><h3>Роли, которые модераторы могут выдавать<small>через /role add и /role remove</small></h3>'
+        + chips("manageable", manage_roles, manageable_sel)
+        + '<div class="hint">Если ничего не выбрано — можно выдавать любые роли ниже своей, кроме ролей с опасными правами.</div></div>'
+    )
+    note = (
+        '<div class="flash warn">Роли с замком 🔒 стоят выше роли VEX или управляются интеграцией, поэтому бот не сможет их выдать. '
+        "Подними роль VEX выше них в настройках сервера → Роли.</div>"
+    )
+    return head("Роли", "Авто-выдача при заходе и список ролей для модераторов.") + note + card("Настройки", form(f"/g/{gid}/roles", inner))
+
+
+def automod_page(gid, s, roles, channels, default_domains):
+    switch = (
+        f'<label class="check"><input type="checkbox" name="enabled" value="1"{" checked" if s["enabled"] else ""}>'
+        "<span>Автомодерация ссылок включена</span></label>"
+    )
+    punish = (
+        '<div class="row">'
+        + field("Нарушений до тайм-аута", f'<input type="number" name="strikes" min="1" max="10" value="{s["strikes"]}">',
+                "Считаются за последние 10 минут.")
+        + field("Тайм-аут, минут", f'<input type="number" name="timeout" min="0" max="1440" value="{s["timeout"]}">',
+                "0 — не выдавать, только удалять ссылки.")
+        + "</div>"
+    )
+    defaults = ", ".join(f"<code>{esc(d)}</code>" for d in default_domains)
+    domains = field(
+        "Разрешённые домены",
+        f'<textarea class="mono" name="domains" placeholder="youtube.com&#10;twitch.tv">{esc(s["domains_text"])}</textarea>',
+        f"По одному в строке. Поддомены разрешаются сами. Всегда разрешены: {defaults}.",
+    )
+    bypass = field("Роли, которых автомодерация не проверяет", chips("bypass", roles, s["bypass"]),
+                   "Администраторы и модераторы с правом «Управлять сообщениями» не проверяются никогда.")
+    ignore = field("Каналы, где ссылки разрешены", chips("ignore", channels, s["ignore"]))
+    return head("Автомодерация", "Защита от нежелательных ссылок и инвайтов.") + card(
+        "Настройки", form(f"/g/{gid}/automod", switch + "<br><br>" + punish + domains + bypass + ignore)
+    )
+
+
+def tickets_page(gid, t, categories, channels, roles, open_tickets):
+    settings = (
+        '<div class="row">'
+        + field("Категория для тикетов", select("category", categories, t["category"]),
+                "Новые тикеты создаются в этой категории.")
+        + field("Канал для логов тикетов", select("log_channel", channels, t["log_channel"]),
+                "Сюда приходят переписки закрытых тикетов.")
+        + field("Тикетов на человека", f'<input type="number" name="max_open" min="1" max="5" value="{t["max_open"]}">')
+        + "</div>"
+        + field("Роли поддержки", chips("support", roles, t["support"]),
+                "Видят все тикеты и могут их вести.")
+        + field(
+            "Типы обращений (меню на панели)",
+            f'<textarea class="mono" name="types" rows="7">{esc(t["types_text"])}</textarea>',
+            "По одному в строке: <code>эмодзи | Название | Описание</code>. Не больше 25. "
+            "После изменения отправь панель заново — старая панель обновится при ближайшем выборе в меню.",
+        )
+    )
+    panel = (
+        '<div class="row">'
+        + field("Канал", select("channel", channels, None, "— выбери канал —"))
+        + field("Заголовок (необязательно)", '<input type="text" name="title" maxlength="200" placeholder="🎫 Центр поддержки">')
+        + "</div>"
+        + field("Текст (необязательно)", '<textarea name="description" rows="4" maxlength="2000" '
+                'placeholder="Если пусто — стандартный текст со списком типов"></textarea>')
+    )
+    if open_tickets:
+        rows = "".join(
+            f"<tr><td>#{x['id']:04d}</td><td>{esc(x['user'])}</td><td>{esc(x['type'])}</td>"
+            f"<td>{esc(x['status'])}</td><td>{esc(x['created'])}</td><td><code>#{esc(x['channel'])}</code></td></tr>"
+            for x in open_tickets
+        )
+        table = (
+            '<div class="tablewrap"><table><tr><th>№</th><th>Автор</th><th>Тип</th><th>Статус</th><th>Создан</th><th>Канал</th></tr>'
+            f"{rows}</table></div>"
+        )
+    else:
+        table = '<p class="muted">Открытых тикетов нет.</p>'
+    return (
+        head("Тикеты", "Панель обращений, роли поддержки и список открытых тикетов.")
+        + card("Настройки", form(f"/g/{gid}/tickets", settings))
+        + card("Отправить панель", form(f"/g/{gid}/tickets/panel", panel, "Отправить панель"),
+               "Сообщение с меню, через которое участники открывают тикеты.")
+        + card("Открытые тикеты", table)
+    )
+
+
+def events_page(gid, events):
+    if not events:
+        return head("События", "Вайп-реакты, созданные командой /wipereact.") + card(
+            "События", '<p class="muted">Событий пока нет. Создай первое командой <code>/wipereact</code> в Discord.</p>'
+        )
+    rows = []
+    for e in events:
+        base = f"/g/{gid}/events/{e['message_id']}"
+        status = '<span class="pill off">приём закрыт</span>' if e["closed"] else '<span class="pill on">идёт приём</span>'
+        actions = (
+            mini_form(f"{base}/toggle", "Открыть приём" if e["closed"] else "Закрыть приём")
+            + mini_form(f"{base}/remind", "Напомнить не ответившим")
+            + f'<details class="inline"><summary>Удалить</summary>{mini_form(f"{base}/delete", "Точно удалить", "btn danger sm")}</details>'
+        )
+        rows.append(
+            f"<tr><td><b>{esc(e['title'])}</b><br><a href=\"{esc(e['url'])}\" target=\"_blank\" rel=\"noopener\">#{esc(e['channel'])}</a></td>"
+            f"<td>{esc(e['when'])}</td><td>✅ {e['accepted']} · ❌ {e['declined']} · 🕒 {e['late']}</td><td>{status}</td><td>{actions}</td></tr>"
+        )
+    table = (
+        '<div class="tablewrap"><table><tr><th>Событие</th><th>Когда</th><th>Ответы</th><th>Статус</th><th>Действия</th></tr>'
+        + "".join(rows) + "</table></div>"
+    )
+    return head("События", "Вайп-реакты, созданные командой /wipereact.") + card("Последние события", table)
+
+
+def general_page(gid, g, channels, timezone):
+    inner = (
+        field("Лог-канал модерации", select("mod_log", channels, g["mod_log"]),
+              "Сюда пишутся действия автомодерации, выдача ролей, сообщения /say, входы и выходы.")
+        + field("Канал приветствий", select("welcome_channel", channels, g["welcome_channel"]),
+                "Если не выбран — приветствия выключены.")
+        + field("Текст приветствия", f'<textarea name="welcome_text" rows="4" maxlength="1500" '
+                f'placeholder="{esc(g["welcome_default"])}">{esc(g["welcome_text"])}</textarea>',
+                "Можно использовать <code>{user}</code> и <code>{server}</code>. Пусто — стандартный текст.")
+    )
+    info = f'<p class="muted">Часовой пояс бота: <code>{esc(timezone)}</code> (задаётся переменной <code>TIMEZONE</code> на хостинге).</p>'
+    return head("Общие настройки", "Логи и приветствие новых участников.") + card("Настройки", form(f"/g/{gid}/general", inner)) + info
+
+
+def error_page(text):
+    return f'<section class="hero"><h1>Ой</h1><p>{esc(text)}</p><a class="btn" href="/">На главную</a></section>'
+''',
+    'vex.web': r'''"""Сайт-панель VEX: вход через Discord (OAuth2), настройка бота в браузере.
+
+Работает в том же процессе, что и бот, и пользуется той же базой.
+Включается, только если хостинг передал порт (переменная PORT).
+"""
+import json
+import logging
+import re
+import secrets
+import time
+from urllib.parse import urlencode
+
+import discord
+from aiohttp import ClientSession, ClientTimeout, web
+
+from . import config, webui
+from .checks import is_admin
+from .cogs.admin import DEFAULT_WELCOME
+from .cogs.automod import normalize_domain
+
+log = logging.getLogger("vex.web")
+
+API = "https://discord.com/api/v10"
+SESSION_TTL = 12 * 3600
+COOKIE = "vex_session"
+STATE_COOKIE = "vex_state"
+INVITE_PERMISSIONS = 1099780320272
+ADMINISTRATOR = 0x8
+USER_AGENT = "DiscordBot (https://discord.com, 1.0) VEX-dashboard"
+
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; img-src 'self' https://cdn.discordapp.com data:; style-src 'unsafe-inline'; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    "Cache-Control": "no-store",
+}
+
+
+# --------------------------------------------------------------------------- общие помощники
+def base_url(request):
+    if config.PUBLIC_URL:
+        return config.PUBLIC_URL
+    proto = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    return f"{proto}://{host}"
+
+
+def is_https(request):
+    return base_url(request).startswith("https://")
+
+
+def html_response(text, status=200):
+    return web.Response(text=text, status=status, content_type="text/html", charset="utf-8")
+
+
+def current_session(request):
+    token = request.cookies.get(COOKIE)
+    if not token:
+        return None
+    store = request.app["sessions"]
+    sess = store.get(token)
+    if sess is None:
+        return None
+    if sess["exp"] < time.time():
+        store.pop(token, None)
+        return None
+    return sess
+
+
+def authorize(request):
+    """Проверяет вход и права на сервер. Возвращает (сессия, сервер) или прерывает запрос."""
+    sess = current_session(request)
+    if sess is None:
+        raise web.HTTPFound("/")
+    try:
+        gid = int(request.match_info["gid"])
+    except (KeyError, ValueError):
+        raise web.HTTPNotFound(text="Сервер не найден")
+    if gid not in sess["guilds"]:
+        raise web.HTTPForbidden(text="Нет доступа к этому серверу")
+    guild = request.app["bot"].get_guild(gid)
+    if guild is None:
+        raise web.HTTPNotFound(text="VEX не добавлен на этот сервер")
+    member = guild.get_member(sess["uid"])
+    if member is not None and not is_admin(member):  # права могли отозвать после входа
+        raise web.HTTPForbidden(text="Ты больше не администратор этого сервера")
+    return sess, guild
+
+
+def check_csrf(sess, data):
+    if not secrets.compare_digest(str(data.get("csrf", "")), sess["csrf"]):
+        raise web.HTTPForbidden(text="Сессия устарела. Обнови страницу и повтори.")
+
+
+async def post_context(request):
+    sess, guild = authorize(request)
+    data = await request.post()
+    check_csrf(sess, data)
+    return sess, guild, data
+
+
+def back(gid, section="", ok=None, err=None):
+    path = f"/g/{gid}" + (f"/{section}" if section else "")
+    if ok:
+        path += f"?ok={ok}"
+    elif err:
+        path += f"?err={err}"
+    return web.HTTPSeeOther(path)
+
+
+def render(request, sess, title, body, guild=None, section=None):
+    user = {"name": sess["name"], "avatar": sess["avatar"]} if sess else None
+    guild_ctx = None
+    if guild is not None:
+        guild_ctx = {"id": guild.id, "name": guild.name, "icon": guild.icon.url if guild.icon else None}
+    text = webui.layout(
+        title, body, user=user, guild=guild_ctx, section=section,
+        csrf=sess["csrf"] if sess else "", ok=request.query.get("ok"), err=request.query.get("err"),
+    )
+    return html_response(text)
+
+
+def role_items(guild, lock=None):
+    me_top = guild.me.top_role
+    items = []
+    for role in sorted(guild.roles, key=lambda r: r.position, reverse=True):
+        if role.is_default():
+            continue
+        item = {"id": role.id, "name": role.name, "color": role.color.value}
+        if lock == "assign" and (role.managed or role >= me_top):
+            item["locked"] = True
+        elif lock == "managed" and role.managed:
+            item["locked"] = True
+        items.append(item)
+    return items
+
+
+def channel_items(guild):
+    return [{"id": c.id, "name": f"#{c.name}"} for c in guild.text_channels]
+
+
+def category_items(guild):
+    return [{"id": c.id, "name": c.name} for c in guild.categories]
+
+
+def free_ids(items):
+    return {i["id"] for i in items if not i.get("locked")}
+
+
+def pick_ids(values, valid):
+    out = []
+    for value in values:
+        text = str(value)
+        if text.isdigit() and int(text) in valid and int(text) not in out:
+            out.append(int(text))
+    return out
+
+
+def pick_one(value, valid):
+    text = str(value or "")
+    return int(text) if text.isdigit() and int(text) in valid else None
+
+
+def clamp(value, low, high, default):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+async def set_or_del(db, gid, key, value):
+    if value is None or value == "":
+        await db.del_setting(gid, key)
+    else:
+        await db.set_setting(gid, key, value)
+
+
+# --------------------------------------------------------------------------- middleware
+@web.middleware
+async def middleware(request, handler):
+    try:
+        response = await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception:
+        log.exception("Ошибка на странице %s", request.path)
+        response = html_response(
+            webui.layout("Ошибка", webui.error_page("Внутренняя ошибка. Подробности записаны в логи бота.")), 500
+        )
+    response.headers.update(SECURITY_HEADERS)
+    return response
+
+
+# --------------------------------------------------------------------------- вход и выход
+def avatar_url(user):
+    if user.get("avatar"):
+        return f"https://cdn.discordapp.com/avatars/{user['id']}/{user['avatar']}.png?size=64"
+    return f"https://cdn.discordapp.com/embed/avatars/{(int(user['id']) >> 22) % 6}.png"
+
+
+def client_id(bot):
+    return config.CLIENT_ID or str(bot.user.id)
+
+
+async def health(request):
+    return web.Response(text="ok")
+
+
+async def index(request):
+    bot = request.app["bot"]
+    sess = current_session(request)
+    if sess is None:
+        body = webui.login_page(bool(config.CLIENT_SECRET))
+        return html_response(
+            webui.layout("Вход", body, ok=request.query.get("ok"), err=request.query.get("err"))
+        )
+    guilds = []
+    for gid in sess["guilds"]:
+        guild = bot.get_guild(gid)
+        if guild:
+            guilds.append({
+                "id": gid, "name": guild.name, "members": guild.member_count,
+                "icon": guild.icon.url if guild.icon else None,
+            })
+    invite = (
+        "https://discord.com/oauth2/authorize?"
+        + urlencode({"client_id": client_id(bot), "scope": "bot applications.commands", "permissions": INVITE_PERMISSIONS})
+    )
+    return render(request, sess, "Серверы", webui.guilds_page(guilds, invite))
+
+
+async def login(request):
+    if not config.CLIENT_SECRET:
+        raise web.HTTPFound("/?err=nosecret")
+    state = secrets.token_urlsafe(24)
+    params = {
+        "client_id": client_id(request.app["bot"]),
+        "redirect_uri": base_url(request) + "/callback",
+        "response_type": "code",
+        "scope": "identify guilds",
+        "state": state,
+        "prompt": "none",
+    }
+    response = web.HTTPFound("https://discord.com/oauth2/authorize?" + urlencode(params))
+    response.set_cookie(STATE_COOKIE, state, max_age=600, httponly=True, samesite="Lax", secure=is_https(request))
+    raise response
+
+
+async def callback(request):
+    bot = request.app["bot"]
+    if request.query.get("error"):
+        raise web.HTTPFound("/?err=denied")
+    code = request.query.get("code")
+    state = request.query.get("state")
+    expected = request.cookies.get(STATE_COOKIE)
+    if not code or not state or not expected or not secrets.compare_digest(state, expected):
+        raise web.HTTPFound("/?err=state")
+
+    async with ClientSession(timeout=ClientTimeout(total=15), headers={"User-Agent": USER_AGENT}) as http:
+        async with http.post(f"{API}/oauth2/token", data={
+            "client_id": client_id(bot),
+            "client_secret": config.CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": base_url(request) + "/callback",
+        }) as resp:
+            if resp.status != 200:
+                log.warning("OAuth: обмен кода не удался (%s): %s", resp.status, (await resp.text())[:200])
+                raise web.HTTPFound("/?err=oauth")
+            token = (await resp.json())["access_token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        async with http.get(f"{API}/users/@me", headers=auth) as resp:
+            if resp.status != 200:
+                raise web.HTTPFound("/?err=oauth")
+            user = await resp.json()
+        async with http.get(f"{API}/users/@me/guilds", headers=auth) as resp:
+            if resp.status != 200:
+                raise web.HTTPFound("/?err=oauth")
+            guilds = await resp.json()
+
+    admin_guilds = {}
+    for item in guilds:
+        permissions = int(item.get("permissions") or 0)
+        if item.get("owner") or permissions & ADMINISTRATOR:
+            admin_guilds[int(item["id"])] = {"name": item["name"]}
+
+    store = request.app["sessions"]
+    now = time.time()
+    for old in [t for t, s in store.items() if s["exp"] < now]:
+        del store[old]
+    session_token = secrets.token_urlsafe(32)
+    store[session_token] = {
+        "uid": int(user["id"]),
+        "name": user.get("global_name") or user["username"],
+        "avatar": avatar_url(user),
+        "guilds": admin_guilds,
+        "csrf": secrets.token_urlsafe(24),
+        "exp": now + SESSION_TTL,
+    }
+    response = web.HTTPFound("/")
+    response.set_cookie(COOKIE, session_token, max_age=SESSION_TTL, httponly=True, samesite="Lax", secure=is_https(request))
+    response.del_cookie(STATE_COOKIE)
+    raise response
+
+
+async def logout(request):
+    sess = current_session(request)
+    data = await request.post()
+    if sess is not None:
+        check_csrf(sess, data)
+        request.app["sessions"].pop(request.cookies.get(COOKIE), None)
+    response = web.HTTPSeeOther("/")
+    response.del_cookie(COOKIE)
+    raise response
+
+
+# --------------------------------------------------------------------------- обзор
+async def overview(request):
+    sess, guild = authorize(request)
+    db = request.app["bot"].db
+    gid = guild.id
+
+    open_tickets = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM tickets WHERE guild_id=? AND status='open'", (gid,)))["c"]
+    active_events = (await db.fetchone(
+        "SELECT COUNT(*) AS c FROM wipe_events WHERE guild_id=? AND closed=0 AND ts>?", (gid, int(time.time()))))["c"]
+    automod_on = await db.get_setting(gid, "automod_enabled", "1") != "0"
+
+    recent = []
+    for row in await db.fetchall(
+        "SELECT user_id, channel_id, link, ts FROM automod_log WHERE guild_id=? ORDER BY id DESC LIMIT 8", (gid,)
+    ):
+        member = guild.get_member(row["user_id"])
+        channel = guild.get_channel(row["channel_id"])
+        recent.append({
+            "when": webui.fmt_ts(row["ts"], config.TIMEZONE),
+            "user": member.display_name if member else str(row["user_id"]),
+            "channel": f"#{channel.name}" if channel else "—",
+            "link": row["link"][:80],
+        })
+
+    me = guild.me
+    perms = me.guild_permissions
+    above = sum(1 for r in guild.roles if not r.is_default() and r > me.top_role)
+    health = [
+        (perms.manage_roles, "Право «Управлять ролями» (для /role и авто-ролей)"),
+        (perms.manage_channels, "Право «Управлять каналами» (для тикетов)"),
+        (perms.manage_messages, "Право «Управлять сообщениями» (для автомодерации)"),
+        (perms.moderate_members, "Право «Отправлять участников подумать» (тайм-ауты автомодерации)"),
+        (bool(await db.get_setting(gid, "mod_log")), "Задан лог-канал модерации (раздел «Общие»)"),
+        (bool(await db.get_setting(gid, "ticket_category")), "Настроена категория тикетов (раздел «Тикеты»)"),
+        (None, f"Выше роли VEX стоит ролей: {above}. Их бот выдать не сможет — при необходимости подними роль VEX."),
+    ]
+    stats = {"open_tickets": open_tickets, "active_events": active_events, "automod_on": automod_on,
+             "members": guild.member_count}
+    return render(request, sess, "Обзор", webui.overview_page(gid, stats, health, recent), guild, "")
+
+
+# --------------------------------------------------------------------------- доступ к командам
+async def access_get(request):
+    sess, guild = authorize(request)
+    db = request.app["bot"].db
+    selected = {}
+    for key in config.COMMAND_KEYS:
+        selected[key] = await db.get_targets(guild.id, f"cmd:{key}")
+    body = webui.access_page(guild.id, role_items(guild), selected, config.COMMAND_KEYS)
+    return render(request, sess, "Доступ к командам", body, guild, "access")
+
+
+async def access_post(request):
+    sess, guild, data = await post_context(request)
+    db = request.app["bot"].db
+    valid = {r["id"] for r in role_items(guild)}
+    for key in config.COMMAND_KEYS:
+        await db.set_targets(guild.id, f"cmd:{key}", pick_ids(data.getall(f"cmd_{key}", []), valid))
+    raise back(guild.id, "access", ok="saved")
+
+
+# --------------------------------------------------------------------------- роли
+async def roles_get(request):
+    sess, guild = authorize(request)
+    db = request.app["bot"].db
+    body = webui.roles_page(
+        guild.id, role_items(guild, "assign"), role_items(guild, "managed"),
+        await db.get_targets(guild.id, "autorole_member"),
+        await db.get_targets(guild.id, "autorole_bot"),
+        await db.get_targets(guild.id, "manageable"),
+    )
+    return render(request, sess, "Роли", body, guild, "roles")
+
+
+async def roles_post(request):
+    sess, guild, data = await post_context(request)
+    db = request.app["bot"].db
+    assignable = free_ids(role_items(guild, "assign"))
+    manageable = free_ids(role_items(guild, "managed"))
+    await db.set_targets(guild.id, "autorole_member", pick_ids(data.getall("autorole_member", []), assignable))
+    await db.set_targets(guild.id, "autorole_bot", pick_ids(data.getall("autorole_bot", []), assignable))
+    await db.set_targets(guild.id, "manageable", pick_ids(data.getall("manageable", []), manageable))
+    raise back(guild.id, "roles", ok="saved")
+
+
+# --------------------------------------------------------------------------- автомодерация
+async def automod_get(request):
+    sess, guild = authorize(request)
+    db = request.app["bot"].db
+    gid = guild.id
+    domains = [r["domain"] for r in await db.fetchall(
+        "SELECT domain FROM allowed_domains WHERE guild_id=? ORDER BY domain", (gid,))]
+    state = {
+        "enabled": await db.get_setting(gid, "automod_enabled", "1") != "0",
+        "strikes": clamp(await db.get_setting(gid, "automod_strikes", "3"), 1, 10, 3),
+        "timeout": clamp(await db.get_setting(gid, "automod_timeout", "10"), 0, 1440, 10),
+        "domains_text": "\n".join(domains),
+        "bypass": await db.get_targets(gid, "automod_bypass"),
+        "ignore": await db.get_targets(gid, "automod_ignore_channel"),
+    }
+    body = webui.automod_page(gid, state, role_items(guild), channel_items(guild), config.DEFAULT_ALLOWED_DOMAINS)
+    return render(request, sess, "Автомодерация", body, guild, "automod")
+
+
+async def automod_post(request):
+    sess, guild, data = await post_context(request)
+    db = request.app["bot"].db
+    gid = guild.id
+    await db.set_setting(gid, "automod_enabled", "1" if data.get("enabled") else "0")
+    await db.set_setting(gid, "automod_strikes", clamp(data.get("strikes"), 1, 10, 3))
+    await db.set_setting(gid, "automod_timeout", clamp(data.get("timeout"), 0, 1440, 10))
+
+    domains = []
+    for item in re.split(r"[\s,;]+", str(data.get("domains", ""))):
+        domain = normalize_domain(item) if item else ""
+        if domain and "." in domain and len(domain) <= 100 and re.fullmatch(r"[a-z0-9.\-]+", domain) \
+                and domain not in domains:
+            domains.append(domain)
+    await db.set_domains(gid, domains[:200])
+
+    await db.set_targets(gid, "automod_bypass",
+                         pick_ids(data.getall("bypass", []), {r["id"] for r in role_items(guild)}))
+    await db.set_targets(gid, "automod_ignore_channel",
+                         pick_ids(data.getall("ignore", []), {c.id for c in guild.text_channels}))
+    raise back(gid, "automod", ok="saved")
+
+
+# --------------------------------------------------------------------------- тикеты
+async def tickets_get(request):
+    sess, guild = authorize(request)
+    db = request.app["bot"].db
+    gid = guild.id
+
+    def as_int(value):
+        return int(value) if value and str(value).isdigit() else None
+
+    types = config.load_ticket_types(await db.get_setting(gid, "ticket_types"))
+    labels = {t["key"]: t["label"] for t in types}
+    state = {
+        "category": as_int(await db.get_setting(gid, "ticket_category")),
+        "log_channel": as_int(await db.get_setting(gid, "ticket_log")),
+        "max_open": clamp(await db.get_setting(gid, "ticket_max_open", "1"), 1, 5, 1),
+        "support": await db.get_targets(gid, "ticket_support"),
+        "types_text": webui.types_to_text(types),
+    }
+    open_tickets = []
+    for row in await db.fetchall(
+        "SELECT id, user_id, type, claimed_by, created_at, channel_id FROM tickets "
+        "WHERE guild_id=? AND status='open' ORDER BY id DESC LIMIT 50", (gid,)
+    ):
+        member = guild.get_member(row["user_id"])
+        channel = guild.get_channel(row["channel_id"])
+        claimer = guild.get_member(row["claimed_by"]) if row["claimed_by"] else None
+        open_tickets.append({
+            "id": row["id"],
+            "user": member.display_name if member else str(row["user_id"]),
+            "type": labels.get(row["type"], "Обращение"),
+            "status": f"В работе — {claimer.display_name}" if claimer else "Ожидает ответа",
+            "created": webui.fmt_ts(row["created_at"], config.TIMEZONE),
+            "channel": channel.name if channel else "удалён",
+        })
+    body = webui.tickets_page(gid, state, category_items(guild), channel_items(guild), role_items(guild), open_tickets)
+    return render(request, sess, "Тикеты", body, guild, "tickets")
+
+
+async def tickets_post(request):
+    sess, guild, data = await post_context(request)
+    db = request.app["bot"].db
+    gid = guild.id
+
+    existing = {t["label"].lower(): (t["key"], t["slug"])
+                for t in config.load_ticket_types(await db.get_setting(gid, "ticket_types"))}
+    types, error = webui.parse_types_text(data.get("types", ""), existing)
+    if error:
+        raise back(gid, "tickets", err=error)
+
+    await db.set_setting(gid, "ticket_types", json.dumps(types, ensure_ascii=False))
+    await set_or_del(db, gid, "ticket_category", pick_one(data.get("category"), {c.id for c in guild.categories}))
+    await set_or_del(db, gid, "ticket_log", pick_one(data.get("log_channel"), {c.id for c in guild.text_channels}))
+    await db.set_setting(gid, "ticket_max_open", clamp(data.get("max_open"), 1, 5, 1))
+    await db.set_targets(gid, "ticket_support",
+                         pick_ids(data.getall("support", []), {r["id"] for r in role_items(guild)}))
+    raise back(gid, "tickets", ok="saved")
+
+
+async def tickets_panel(request):
+    sess, guild, data = await post_context(request)
+    channels = {c.id: c for c in guild.text_channels}
+    channel_id = pick_one(data.get("channel"), set(channels))
+    if channel_id is None:
+        raise back(guild.id, "tickets", err="channel")
+    channel = channels[channel_id]
+    perms = channel.permissions_for(guild.me)
+    if not (perms.send_messages and perms.embed_links):
+        raise back(guild.id, "tickets", err="noperm")
+    cog = request.app["bot"].get_cog("Tickets")
+    if cog is None:
+        raise back(guild.id, "tickets", err="nocog")
+    title = str(data.get("title", "")).strip()[:200] or None
+    description = str(data.get("description", "")).strip()[:2000] or None
+    try:
+        await cog.send_panel(channel, title, description)
+    except discord.HTTPException:
+        raise back(guild.id, "tickets", err="noperm")
+    raise back(guild.id, "tickets", ok="sent")
+
+
+# --------------------------------------------------------------------------- события
+async def events_get(request):
+    sess, guild = authorize(request)
+    db = request.app["bot"].db
+    gid = guild.id
+    events = []
+    for ev in await db.fetchall("SELECT * FROM wipe_events WHERE guild_id=? ORDER BY ts DESC LIMIT 25", (gid,)):
+        counts = {"accepted": 0, "declined": 0, "late": 0}
+        for row in await db.fetchall(
+            "SELECT status, COUNT(*) AS c FROM wipe_responses WHERE message_id=? GROUP BY status", (ev["message_id"],)
+        ):
+            if row["status"] in counts:
+                counts[row["status"]] = row["c"]
+        channel = guild.get_channel(ev["channel_id"])
+        events.append({
+            "message_id": ev["message_id"],
+            "title": ev["title"],
+            "when": webui.fmt_ts(ev["ts"], config.TIMEZONE),
+            "closed": bool(ev["closed"]),
+            "channel": channel.name if channel else "удалён",
+            "url": f"https://discord.com/channels/{gid}/{ev['channel_id']}/{ev['message_id']}",
+            **counts,
+        })
+    return render(request, sess, "События", webui.events_page(gid, events), guild, "events")
+
+
+async def event_action(request):
+    sess, guild, data = await post_context(request)
+    db = request.app["bot"].db
+    message_id = request.match_info["mid"]
+    action = request.match_info["action"]
+    if not message_id.isdigit() or action not in ("toggle", "delete", "remind"):
+        raise web.HTTPNotFound()
+    ev = await db.fetchone(
+        "SELECT * FROM wipe_events WHERE message_id=? AND guild_id=?", (int(message_id), guild.id)
+    )
+    if ev is None:
+        raise back(guild.id, "events", err="noevent")
+    cog = request.app["bot"].get_cog("Wipe")
+    if cog is None:
+        raise back(guild.id, "events", err="nocog")
+    if action == "toggle":
+        await cog.set_closed(ev["message_id"], not ev["closed"])
+        raise back(guild.id, "events", ok="saved")
+    if action == "delete":
+        await cog.delete_event(ev["message_id"])
+        raise back(guild.id, "events", ok="deleted")
+    count = await cog.remind_pending(ev["message_id"])
+    raise back(guild.id, "events", ok="reminded" if count else "noone")
+
+
+# --------------------------------------------------------------------------- общие
+async def general_get(request):
+    sess, guild = authorize(request)
+    db = request.app["bot"].db
+    gid = guild.id
+
+    def as_int(value):
+        return int(value) if value and str(value).isdigit() else None
+
+    state = {
+        "mod_log": as_int(await db.get_setting(gid, "mod_log")),
+        "welcome_channel": as_int(await db.get_setting(gid, "welcome_channel")),
+        "welcome_text": await db.get_setting(gid, "welcome_text", ""),
+        "welcome_default": DEFAULT_WELCOME.replace("\n", " "),
+    }
+    body = webui.general_page(gid, state, channel_items(guild), config.TIMEZONE)
+    return render(request, sess, "Общие настройки", body, guild, "general")
+
+
+async def general_post(request):
+    sess, guild, data = await post_context(request)
+    db = request.app["bot"].db
+    gid = guild.id
+    valid = {c.id for c in guild.text_channels}
+    await set_or_del(db, gid, "mod_log", pick_one(data.get("mod_log"), valid))
+    await set_or_del(db, gid, "welcome_channel", pick_one(data.get("welcome_channel"), valid))
+    text = str(data.get("welcome_text", "")).replace("\r\n", "\n").strip()[:1500]
+    await set_or_del(db, gid, "welcome_text", text)
+    raise back(gid, "general", ok="saved")
+
+
+# --------------------------------------------------------------------------- запуск
+def build_app(bot):
+    app = web.Application(middlewares=[middleware])
+    app["bot"] = bot
+    app["sessions"] = {}
+    app.router.add_get("/", index)
+    app.router.add_get("/health", health)
+    app.router.add_get("/login", login)
+    app.router.add_get("/callback", callback)
+    app.router.add_post("/logout", logout)
+    app.router.add_get("/g/{gid}", overview)
+    for section, getter, poster in (
+        ("access", access_get, access_post),
+        ("roles", roles_get, roles_post),
+        ("automod", automod_get, automod_post),
+        ("tickets", tickets_get, tickets_post),
+        ("general", general_get, general_post),
+    ):
+        app.router.add_get(f"/g/{{gid}}/{section}", getter)
+        app.router.add_post(f"/g/{{gid}}/{section}", poster)
+    app.router.add_post("/g/{gid}/tickets/panel", tickets_panel)
+    app.router.add_get("/g/{gid}/events", events_get)
+    app.router.add_post("/g/{gid}/events/{mid}/{action}", event_action)
+    return app
+
+
+async def start_web(bot):
+    """Запускает сайт. Возвращает runner (для остановки) или None, если сайт выключен."""
+    if not config.WEB_PORT:
+        log.info("Сайт выключен: хостинг не передал порт (PORT). Включи опцию «Использовать домен».")
+        return None
+    try:
+        runner = web.AppRunner(build_app(bot))
+        await runner.setup()
+        await web.TCPSite(runner, "0.0.0.0", config.WEB_PORT).start()
+    except OSError:
+        log.exception("Не удалось запустить сайт на порту %s", config.WEB_PORT)
+        return None
+    log.info("Сайт запущен на порту %s%s", config.WEB_PORT,
+             "" if config.CLIENT_SECRET else " (вход не настроен: нет DISCORD_CLIENT_SECRET)")
+    return runner
+''',
     'vex.cogs': r'''''',
     'vex.cogs.tickets': r'''"""Тикеты: панель с меню, приватные каналы, управление, транскрипты (как в Ticket Tool)."""
 import asyncio
@@ -461,22 +1698,23 @@ from discord.ext import commands
 from .. import config, embeds
 from ..checks import access, member_has_access
 
-TYPE_MAP = {t["key"]: t for t in config.TICKET_TYPES}
 TZ = ZoneInfo(config.TIMEZONE)
+FALLBACK_TYPE = {"label": "Обращение", "emoji": "🎫", "slug": "ticket", "description": ""}
 
 
 # --------------------------------------------------------------------------- эмбеды
-def panel_embed(title=None, description=None):
+def panel_embed(types, title=None, description=None):
     if description:
         text = description
     else:
-        types = "\n".join(
-            f"{t['emoji']} **{t['label']}** — {t['description']}" for t in config.TICKET_TYPES
+        listing = "\n".join(
+            f"{t['emoji'] or '▫️'} **{t['label']}**" + (f" — {t['description']}" if t["description"] else "")
+            for t in types
         )
         text = (
             "Нужна помощь или хочешь вступить в клан?\n"
             "Выбери тип обращения в меню ниже — для тебя создастся приватный канал, "
-            "где с тобой свяжется администрация.\n\n" + types
+            "где с тобой свяжется администрация.\n\n" + listing
         )
     embed = embeds.make(title or "🎫 Центр поддержки", text)
     if not description:
@@ -488,9 +1726,9 @@ def panel_embed(title=None, description=None):
     return embed
 
 
-def ticket_embed(guild, row):
-    t = TYPE_MAP.get(row["type"], {"label": "Обращение", "emoji": "🎫"})
-    embed = embeds.make(f"{t['emoji']} Тикет #{row['id']:04d} — {t['label']}")
+def ticket_embed(guild, row, types_map):
+    t = types_map.get(row["type"], FALLBACK_TYPE)
+    embed = embeds.make(f"{t['emoji'] or '🎫'} Тикет #{row['id']:04d} — {t['label']}")
     embed.description = f">>> {row['reason']}"[:4000]
     embed.add_field(name="👤 Автор", value=f"<@{row['user_id']}>", inline=True)
     if row["claimed_by"]:
@@ -507,8 +1745,7 @@ def ticket_embed(guild, row):
 
 # --------------------------------------------------------------------------- интерфейс
 class TicketReasonModal(discord.ui.Modal):
-    def __init__(self, cog, type_key):
-        label = TYPE_MAP[type_key]["label"]
+    def __init__(self, cog, type_key, label):
         super().__init__(title=label[:45])
         self.cog = cog
         self.type_key = type_key
@@ -526,12 +1763,12 @@ class TicketReasonModal(discord.ui.Modal):
 
 
 class TicketSelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, types):
         options = [
             discord.SelectOption(
-                label=t["label"], value=t["key"], description=t["description"][:100], emoji=t["emoji"]
+                label=t["label"], value=t["key"], description=t["description"] or None, emoji=t["emoji"] or None
             )
-            for t in config.TICKET_TYPES
+            for t in types
         ]
         super().__init__(
             placeholder="Выберите тип обращения…",
@@ -543,18 +1780,20 @@ class TicketSelect(discord.ui.Select):
 
     async def callback(self, interaction):
         cog = interaction.client.get_cog("Tickets")
-        await interaction.response.send_modal(TicketReasonModal(cog, self.values[0]))
-        # сбрасываем выбор в меню, чтобы им можно было пользоваться снова
+        types = await cog.get_types(interaction.guild.id)
+        label = next((t["label"] for t in types if t["key"] == self.values[0]), FALLBACK_TYPE["label"])
+        await interaction.response.send_modal(TicketReasonModal(cog, self.values[0], label))
+        # сбрасываем выбор в меню (и подтягиваем актуальный список типов)
         try:
-            await interaction.message.edit(view=TicketPanelView())
+            await interaction.message.edit(view=TicketPanelView(types))
         except discord.HTTPException:
             pass
 
 
 class TicketPanelView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, types=None):
         super().__init__(timeout=None)
-        self.add_item(TicketSelect())
+        self.add_item(TicketSelect(types or config.load_ticket_types(None)))
 
 
 class TicketControlView(discord.ui.View):
@@ -600,6 +1839,18 @@ class Tickets(commands.Cog):
         self.bot.add_view(TicketControlView())
 
     # ---- вспомогательное
+    async def get_types(self, guild_id):
+        """Типы обращений сервера (настраиваются на сайте)."""
+        return config.load_ticket_types(await self.bot.db.get_setting(guild_id, "ticket_types"))
+
+    async def get_types_map(self, guild_id):
+        return {t["key"]: t for t in await self.get_types(guild_id)}
+
+    async def send_panel(self, channel, title=None, description=None):
+        """Отправляет в канал панель с меню типов. Используется и командой, и сайтом."""
+        types = await self.get_types(channel.guild.id)
+        return await channel.send(embed=panel_embed(types, title, description), view=TicketPanelView(types))
+
     async def get_ticket(self, channel_id):
         return await self.bot.db.fetchone(
             "SELECT * FROM tickets WHERE channel_id=? AND status='open'", (channel_id,)
@@ -692,7 +1943,8 @@ class Tickets(commands.Cog):
         for role in support_roles:
             overwrites[role] = staff_perms
 
-        slug = TYPE_MAP[type_key]["slug"]
+        types_map = await self.get_types_map(guild.id)
+        slug = types_map.get(type_key, FALLBACK_TYPE)["slug"]
         try:
             channel = await guild.create_text_channel(
                 name=f"{slug}-{ticket_id:04d}",
@@ -715,7 +1967,7 @@ class Tickets(commands.Cog):
         pings = " ".join([user.mention] + [r.mention for r in support_roles])
         await channel.send(
             content=pings,
-            embed=ticket_embed(guild, row),
+            embed=ticket_embed(guild, row, types_map),
             view=TicketControlView(),
             allowed_mentions=discord.AllowedMentions(users=True, roles=True),
         )
@@ -764,7 +2016,8 @@ class Tickets(commands.Cog):
         )
         row = await self.bot.db.fetchone("SELECT * FROM tickets WHERE id=?", (row["id"],))
         await interaction.response.edit_message(
-            embed=ticket_embed(interaction.guild, row), view=TicketControlView()
+            embed=ticket_embed(interaction.guild, row, await self.get_types_map(interaction.guild.id)),
+            view=TicketControlView(),
         )
         await interaction.channel.send(
             embed=embeds.info(f"✋ {interaction.user.mention} взял(а) тикет в работу."),
@@ -829,7 +2082,7 @@ class Tickets(commands.Cog):
             return
         text = description.replace("\\n", "\n") if description else None
         try:
-            await channel.send(embed=panel_embed(title, text), view=TicketPanelView())
+            await self.send_panel(channel, title, text)
         except discord.Forbidden:
             await interaction.response.send_message(
                 embed=embeds.err(f"У меня нет прав писать в {channel.mention}."), ephemeral=True
@@ -1222,6 +2475,48 @@ class Wipe(commands.Cog):
         except discord.HTTPException:
             pass
 
+    # ---- действия для сайта
+    async def fetch_event_message(self, ev):
+        channel = self.bot.get_channel(ev["channel_id"])
+        if channel is None:
+            return None
+        try:
+            return await channel.fetch_message(ev["message_id"])
+        except discord.HTTPException:
+            return None
+
+    async def set_closed(self, message_id, closed):
+        await self.bot.db.execute("UPDATE wipe_events SET closed=? WHERE message_id=?", (int(closed), message_id))
+        ev = await self.get_event(message_id)
+        message = await self.fetch_event_message(ev) if ev else None
+        if message:
+            await self.refresh_message(message, message_id)
+
+    async def delete_event(self, message_id):
+        ev = await self.get_event(message_id)
+        message = await self.fetch_event_message(ev) if ev else None
+        await self.bot.db.execute("DELETE FROM wipe_responses WHERE message_id=?", (message_id,))
+        await self.bot.db.execute("DELETE FROM wipe_events WHERE message_id=?", (message_id,))
+        if message:
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+
+    async def remind_pending(self, message_id):
+        """Упоминает не ответивших под событием. Возвращает, скольким напомнили."""
+        ev = await self.get_event(message_id)
+        message = await self.fetch_event_message(ev) if ev else None
+        if message is None:
+            return 0
+        pending = await self.pending_members(message.guild, message.channel, ev)
+        for chunk in chunk_mentions(pending):
+            await message.reply(
+                f"🔔 Отметьтесь, пожалуйста, под событием!\n{chunk}",
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+        return len(pending)
+
     async def can_manage(self, member, ev):
         return member.id == ev["creator_id"] or await member_has_access(self.bot, member, "wipe")
 
@@ -1595,6 +2890,16 @@ class AutoMod(commands.Cog):
         now = now_ts()
         history = [t for t in self.strikes.get(key, []) if now - t < STRIKE_WINDOW] + [now]
         self.strikes[key] = history
+
+        await db.execute(
+            "INSERT INTO automod_log(guild_id, user_id, channel_id, link, ts) VALUES(?,?,?,?,?)",
+            (guild.id, member.id, message.channel.id, link[:200], int(now)),
+        )
+        await db.execute(  # храним последние 200 записей на сервер
+            "DELETE FROM automod_log WHERE guild_id=? AND id NOT IN "
+            "(SELECT id FROM automod_log WHERE guild_id=? ORDER BY id DESC LIMIT 200)",
+            (guild.id, guild.id),
+        )
 
         action = "Сообщение удалено" if deleted else "❗ Не удалось удалить (нет прав Manage Messages)"
         timed_out = False
